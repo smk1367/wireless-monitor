@@ -1,0 +1,2627 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+
+<head>
+
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+>
+
+<title>
+    Wireless Monitor
+</title>
+
+<style>
+
+body{
+    font-family:Tahoma,Arial,sans-serif;
+    background:#0f172a;
+    color:#e5e7eb;
+    margin:0
+}
+
+.wrap{
+    max-width:1500px;
+    margin:auto;
+    padding:20px
+}
+
+.card{
+    background:#1e293b;
+    border:1px solid #334155;
+    border-radius:12px;
+    padding:16px;
+    margin-bottom:16px
+}
+
+.toolbar,
+.tabs,
+.row{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(220px,1fr)
+        );
+    gap:12px
+}
+
+.btn,
+input,
+select,
+textarea{
+    padding:10px;
+    border-radius:8px;
+    border:1px solid #475569;
+    background:#0f172a;
+    color:#e5e7eb
+}
+
+input,
+select,
+textarea{
+    width:100%;
+    box-sizing:border-box
+}
+
+.btn{
+    cursor:pointer
+}
+
+.primary{
+    background:#2563eb
+}
+
+.danger{
+    background:#991b1b
+}
+
+.tab{
+    padding:9px 12px;
+    border:1px solid #475569;
+    border-radius:8px;
+    cursor:pointer;
+    background:#0f172a;
+    color:#e5e7eb
+}
+
+.tab.active{
+    background:#2563eb
+}
+
+.table{
+    overflow:auto
+}
+
+.table table{
+    width:100%;
+    border-collapse:collapse
+}
+
+.table th,
+.table td{
+    padding:9px;
+    border-bottom:
+        1px solid #334155;
+    text-align:right;
+    white-space:nowrap
+}
+
+.muted{
+    color:#94a3b8
+}
+
+.ok{
+    color:#4ade80
+}
+
+.err{
+    color:#f87171
+}
+
+.click{
+    color:#60a5fa;
+    cursor:pointer
+}
+
+.raw{
+    white-space:pre-wrap;
+    background:#0b1120;
+    padding:12px;
+    border-radius:8px;
+    max-height:450px;
+    overflow:auto
+}
+
+.loading{
+    padding:20px;
+    text-align:center;
+    color:#94a3b8
+}
+
+.scan-status{
+    padding:10px;
+    border-radius:8px;
+    background:#0f172a;
+    margin-top:10px;
+    margin-bottom:10px
+}
+
+.form-grid{
+    display:grid;
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(240px,1fr)
+        );
+    gap:12px
+}
+
+.field{
+    display:flex;
+    flex-direction:column;
+    gap:6px
+}
+
+.field label{
+    color:#cbd5e1;
+    font-size:13px
+}
+
+.manual-badge{
+    display:inline-block;
+    padding:3px 8px;
+    margin-right:5px;
+    border-radius:999px;
+    background:#14532d;
+    color:#86efac;
+    font-size:11px
+}
+
+.auto-badge{
+    display:inline-block;
+    padding:3px 8px;
+    margin-right:5px;
+    border-radius:999px;
+    background:#334155;
+    color:#cbd5e1;
+    font-size:11px
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div
+    class="wrap"
+    id="app"
+></div>
+
+<script>
+
+const API =
+    location.protocol === 'file:'
+        ? 'http://localhost:5000'
+        : location.origin;
+
+
+let AUTH = '';
+let ME = null;
+let current = null;
+
+
+/* ============================================================
+   Helpers
+   ============================================================ */
+
+function h(s){
+
+    const d =
+        document.createElement(
+            'div'
+        );
+
+    d.textContent =
+        s ?? '';
+
+    return (
+        d.innerHTML || '-'
+    );
+}
+
+
+async function api(
+    url,
+    opt={}
+){
+
+    opt.headers =
+        Object.assign(
+            {
+                'Authorization':
+                    AUTH,
+
+                'Content-Type':
+                    'application/json'
+            },
+
+            opt.headers || {}
+        );
+
+    const r =
+        await fetch(
+            API + url,
+            opt
+        );
+
+    if(
+        r.status === 401
+    ){
+
+        throw new Error(
+            'auth'
+        );
+    }
+
+    let j = {};
+
+    try{
+
+        j = await r.json();
+
+    }catch{
+
+        j = {};
+
+    }
+
+    if(!r.ok){
+
+        throw new Error(
+            j.message ||
+            j.error ||
+            `HTTP ${r.status}`
+        );
+    }
+
+    return j;
+}
+
+
+/* ============================================================
+   Login
+   ============================================================ */
+
+function login(){
+
+    app.innerHTML = `
+
+        <div
+            class="card"
+            style="max-width:420px;margin:10vh auto"
+        >
+
+            <h2>
+                🔐 ورود
+            </h2>
+
+            <input
+                id="u"
+                placeholder="نام کاربری"
+            >
+
+            <br><br>
+
+            <input
+                id="p"
+                type="password"
+                placeholder="رمز عبور"
+            >
+
+            <br><br>
+
+            <button
+                class="btn primary"
+                onclick="doLogin()"
+            >
+                ورود
+            </button>
+
+        </div>
+    `;
+}
+
+
+async function doLogin(){
+
+    const u =
+        document
+        .getElementById("u")
+        .value
+        .trim();
+
+    const p =
+        document
+        .getElementById("p")
+        .value;
+
+    if(!u || !p){
+
+        alert(
+            "نام کاربری و رمز عبور را وارد کنید"
+        );
+
+        return;
+    }
+
+    AUTH =
+        "Basic " +
+        btoa(
+            u + ":" + p
+        );
+
+    try{
+
+        ME =
+            await api(
+                "/api/me"
+            );
+
+        await loadHome();
+
+    }
+    catch(e){
+
+        console.error(e);
+
+        alert(
+            "نام کاربری یا رمز عبور اشتباه است"
+        );
+
+        AUTH = '';
+        ME = null;
+    }
+}
+
+
+/* ============================================================
+   Home
+   ============================================================ */
+async function loadHome(){
+
+    app.innerHTML = `
+
+        <div class="card">
+
+            <div class="loading">
+                در حال دریافت اطلاعات...
+            </div>
+
+        </div>
+    `;
+
+    try{
+
+        /*
+         * برای همه کاربران:
+         * stats + devices
+         *
+         * فقط برای Full:
+         * scan-history
+         */
+
+        const promises = [
+
+            api(
+                "/api/stats"
+            ),
+
+            api(
+                "/api/devices"
+            )
+
+        ];
+
+        if(
+            ME &&
+            ME.role === "full"
+        ){
+
+            promises.push(
+
+                api(
+                    "/api/scan-history?limit=10"
+                )
+
+            );
+
+        }
+
+        const results =
+            await Promise.all(
+                promises
+            );
+
+        const st =
+            results[0];
+
+        const dev =
+            results[1];
+
+        const his =
+            results[2] || [];
+
+
+        /*
+         * صفحه اصلی
+         */
+
+        app.innerHTML = `
+
+            <div class="card">
+
+                <h1>
+                    📡 SMK_WIRELESS_SABANET
+                </h1>
+
+                <div class="muted">
+                    کاربر:
+                    ${h(ME?.username)}
+                </div>
+
+            </div>
+
+
+            <div class="grid">
+
+                <div class="card">
+
+                    کل دستگاه‌ها
+
+                    <h2>
+                        ${st.total_devices}
+                    </h2>
+
+                </div>
+
+
+                <div class="card">
+
+                    آنلاین
+
+                    <h2>
+                        ${st.success_count}
+                    </h2>
+
+                </div>
+
+
+                ${
+                    Object
+                    .entries(
+                        st.by_type || {}
+                    )
+                    .map(
+                        x => `
+
+                        <div class="card">
+
+                            ${h(x[0])}
+
+                            <h2>
+                                ${x[1]}
+                            </h2>
+
+                        </div>
+
+                        `
+                    )
+                    .join('')
+                }
+
+            </div>
+
+
+            <div class="card">
+
+                <div class="toolbar">
+
+                    <input
+                        id="q"
+                        style="max-width:420px"
+                        placeholder="جستجو IP / Hostname / SSID / Model"
+                    >
+
+
+                    <button
+                        class="btn"
+                        onclick="loadDevices()"
+                    >
+                        جستجو
+                    
+                    
+                    
+                    ${
+                        ME &&
+                        ME.role === "full"
+                        ?
+                        `
+                        <button
+                            class="btn primary"
+                            onclick="scanAll()"
+                        >
+                            ⚡ اسکن فوری
+                        </button>
+                        `
+                        :
+                        ""
+                    }
+
+
+
+
+
+                    ${
+                        ME &&
+                        ME.role === "full"
+                        ?
+                        `
+                        <button
+                            class="btn"
+                            onclick="openAdmin()"
+                        >
+                            ⚙ مدیریت
+                        </button>
+                        `
+                        :
+                        ""
+                    }
+
+
+                    <button
+                        class="btn"
+                        onclick="loadHome()"
+                    >
+                        🔄 بروزرسانی
+                    </button>
+
+                </div>
+
+
+                <div
+                    id="scanStatus"
+                    class="scan-status"
+                ></div>
+
+
+                <div
+                    id="devices"
+                    class="table"
+                ></div>
+
+            </div>
+
+
+            ${
+                ME &&
+                ME.role === "full"
+                ?
+                `
+                <div class="card">
+
+                    <h3>
+                        📋 تاریخچه اسکن
+                    </h3>
+
+                    <div
+                        id="history"
+                        class="table"
+                    ></div>
+
+                </div>
+                `
+                :
+                ""
+            }
+
+        `;
+
+
+        /*
+         * نمایش دستگاه‌ها
+         */
+
+        renderDevices(
+            dev
+        );
+
+
+        /*
+         * فقط Full تاریخچه را نمایش می‌دهد
+         */
+
+        if(
+            ME &&
+            ME.role === "full"
+        ){
+
+            renderHistory(
+                his
+            );
+
+        }
+
+
+        /*
+         * وضعیت اسکن
+         */
+
+        updateScanStatus();
+
+    }
+    catch(e){
+
+        console.error(e);
+
+
+        if(
+            e.message === "auth"
+        ){
+
+            AUTH = '';
+            ME = null;
+
+            login();
+
+            return;
+        }
+
+
+        app.innerHTML = `
+
+            <div class="card">
+
+                <h2>
+                    ❌ خطا
+                </h2>
+
+                <p>
+                    ${h(e.message)}
+                </p>
+
+
+                <button
+                    class="btn"
+                    onclick="loadHome()"
+                >
+                    تلاش مجدد
+                </button>
+
+            </div>
+
+        `;
+    }
+}
+
+/* ============================================================
+   Devices
+   ============================================================ */
+
+function renderDevices(
+    result
+){
+
+    const box =
+        document.getElementById(
+            "devices"
+        );
+
+    if(!box){
+        return;
+    }
+
+    const devices =
+        Array.isArray(result)
+            ? result
+            : [];
+
+    if(!devices.length){
+
+        box.innerHTML = `
+
+            <div
+                class="card"
+            >
+                هیچ دستگاهی پیدا نشد.
+            </div>
+        `;
+
+        return;
+    }
+
+    box.innerHTML = `
+
+        <table>
+
+            <tr>
+
+                <th>
+                    IP
+                </th>
+
+                <th>
+                    نوع
+                </th>
+
+                <th>
+                    نام
+                </th>
+
+                <th>
+                    SSID
+                </th>
+
+                <th>
+                    فرکانس
+                </th>
+
+                <th>
+                    Power
+                </th>
+
+                <th>
+                    Signal
+                </th>
+
+                <th>
+                    MAC
+                </th>
+
+                <th>
+                    Status
+                </th>
+
+                <th>
+                    Update
+                </th>
+
+            </tr>
+
+            ${
+                devices
+                .map(
+                    d => `
+
+                    <tr>
+
+                        <td
+                            class="click"
+                            onclick="detail('${d.ip_address}')"
+                        >
+                            ${h(d.ip_address)}
+                        </td>
+
+                        <td>
+                            ${h(d.device_type)}
+                        </td>
+
+                        <td>
+                            ${h(d.hostname)}
+                        </td>
+
+                        <td>
+                            ${h(d.ssid)}
+                        </td>
+
+                        <td>
+                            ${h(d.frequency)}
+                        </td>
+
+                        <td>
+                            ${h(d.tx_power)}
+                        </td>
+
+                        <td>
+                            ${h(d.signal_strength)}
+                        </td>
+
+                        <td>
+                            ${h(d.mac_address)}
+                        </td>
+
+                        <td>
+
+                            ${
+                                d.scan_status === "success"
+
+                                ?
+
+                                `<span class="ok">
+                                    آنلاین
+                                </span>`
+
+                                :
+
+                                `<span class="err">
+                                    خطا
+                                </span>`
+                            }
+
+                        </td>
+
+                        <td>
+                            ${h(d.last_updated)}
+                        </td>
+
+                    </tr>
+
+                    `
+                )
+                .join('')
+            }
+
+        </table>
+    `;
+}
+
+
+async function loadDevices(){
+
+    const q =
+        document.getElementById(
+            "q"
+        )?.value || '';
+
+    const url =
+        "/api/devices" +
+        (
+            q
+                ? "?q=" +
+                  encodeURIComponent(q)
+                : ""
+        );
+
+    try{
+
+        const result =
+            await api(
+                url
+            );
+
+        renderDevices(
+            result
+        );
+
+    }
+    catch(e){
+
+        alert(
+            "خطا در دریافت دستگاه‌ها: " +
+            e.message
+        );
+    }
+}
+
+
+/* ============================================================
+   Scan
+   ============================================================ */
+
+async function scanAll(){
+
+    try{
+
+        const result =
+            await api(
+                "/api/scan-now",
+                {
+                    method:
+                        "POST",
+                    body:
+                        "{}"
+                }
+            );
+
+        alert(
+            result.message ||
+            "اسکن شروع شد"
+        );
+
+        updateScanStatus();
+
+    }
+    catch(e){
+
+        alert(
+            "خطا در شروع اسکن: " +
+            e.message
+        );
+    }
+}
+
+
+async function updateScanStatus(){
+
+    const box =
+        document.getElementById(
+            "scanStatus"
+        );
+
+    if(!box){
+        return;
+    }
+
+    try{
+
+        const result =
+            await api(
+                "/api/scan-status"
+            );
+
+        if(
+            result.running
+        ){
+
+            box.innerHTML = `
+
+                <span class="ok">
+                    🔄 اسکن در حال اجرا است...
+                </span>
+            `;
+
+            setTimeout(
+                updateScanStatus,
+                3000
+            );
+
+        }
+        else{
+
+            box.innerHTML = `
+                ⏸ اسکن در حال اجرا نیست
+            `;
+
+        }
+
+    }
+    catch{
+
+        box.innerHTML =
+            "وضعیت اسکن نامشخص";
+    }
+}
+
+
+/* ============================================================
+   History
+   ============================================================ */
+
+function renderHistory(
+    history
+){
+
+    const box =
+        document.getElementById(
+            "history"
+        );
+
+    if(!box){
+        return;
+    }
+
+    if(
+        !Array.isArray(history)
+        ||
+        !history.length
+    ){
+
+        box.innerHTML = `
+            <div class="muted">
+                هنوز تاریخچه‌ای ثبت نشده است.
+            </div>
+        `;
+
+        return;
+    }
+
+    box.innerHTML = `
+
+        <table>
+
+            <tr>
+
+                <th>
+                    Scan
+                </th>
+
+                <th>
+                    زمان
+                </th>
+
+                <th>
+                    کل IP
+                </th>
+
+                <th>
+                    یافت‌شده
+                </th>
+
+                <th>
+                    موفق
+                </th>
+
+                <th>
+                    ناموفق
+                </th>
+
+                <th>
+                    مدت
+                </th>
+
+                <th>
+                    جزئیات
+                </th>
+
+            </tr>
+
+            ${
+                history
+                .map(
+                    s => `
+
+                    <tr>
+
+                        <td>
+                            #${s.id}
+                        </td>
+
+                        <td>
+                            ${h(s.scan_time)}
+                        </td>
+
+                        <td>
+                            ${h(s.total_ips_scanned)}
+                        </td>
+
+                        <td>
+                            ${h(s.devices_found)}
+                        </td>
+
+                        <td class="ok">
+                            ${h(s.devices_success)}
+                        </td>
+
+                        <td class="err">
+                            ${h(s.devices_failed)}
+                        </td>
+
+                        <td>
+                            ${
+                                Number(
+                                    s.duration_seconds || 0
+                                ).toFixed(1)
+                            }
+                            ثانیه
+                        </td>
+
+                        <td>
+
+                            <button
+                                class="btn"
+                                onclick="scanDetail(${s.id})"
+                            >
+                                مشاهده IPها
+                            </button>
+
+                        </td>
+
+                    </tr>
+                    `
+                )
+                .join('')
+            }
+
+        </table>
+    `;
+}
+
+
+/* ============================================================
+   Scan Detail
+   ============================================================ */
+
+async function scanDetail(
+    id
+){
+
+    try{
+
+        const result =
+            await api(
+                "/api/scan/" +
+                id
+            );
+
+        const scan =
+            result.scan || {};
+
+        const rows =
+            result.results || [];
+
+        app.innerHTML = `
+
+            <div class="card">
+
+                <button
+                    class="btn"
+                    onclick="loadHome()"
+                >
+                    بازگشت
+                </button>
+
+                <h2>
+                    📋 Scan #${id}
+                </h2>
+
+                <div class="muted">
+                    زمان:
+                    ${h(scan.scan_time)}
+                </div>
+
+            </div>
+
+            <div class="card">
+
+                <div class="table">
+
+                    <table>
+
+                        <tr>
+
+                            <th>
+                                IP
+                            </th>
+
+                            <th>
+                                وضعیت
+                            </th>
+
+                            <th>
+                                نوع
+                            </th>
+
+                            <th>
+                                نام
+                            </th>
+
+                            <th>
+                                SSH
+                            </th>
+
+                            <th>
+                                مشاهده
+                            </th>
+
+                        </tr>
+
+                        ${
+                            rows
+                            .map(
+                                r => {
+
+                                    const s =
+                                        r.snapshot
+                                        || {};
+
+                                    return `
+
+                                    <tr>
+
+                                        <td
+                                            class="click"
+                                            onclick="showSnapshot(${JSON.stringify(JSON.stringify(s))})"
+                                        >
+                                            ${h(r.ip_address)}
+                                        </td>
+
+                                        <td>
+
+                                            ${
+                                                r.status === "success"
+
+                                                ?
+
+                                                `<span class="ok">
+                                                    موفق
+                                                </span>`
+
+                                                :
+
+                                                `<span class="err">
+                                                    ${h(r.status)}
+                                                </span>`
+                                            }
+
+                                        </td>
+
+                                        <td>
+                                            ${h(s.device_type)}
+                                        </td>
+
+                                        <td>
+                                            ${h(s.hostname)}
+                                        </td>
+
+                                        <td>
+                                            ${h(
+                                                s.connection_method ||
+                                                s.credential_id
+                                            )}
+                                        </td>
+
+                                        <td>
+
+                                            <button
+                                                class="btn"
+                                                onclick="showSnapshot(${JSON.stringify(JSON.stringify(s))})"
+                                            >
+                                                Snapshot
+                                            </button>
+
+                                            ${
+                                                r.status === "success"
+
+                                                ?
+
+                                                `<button
+                                                    class="btn"
+                                                    onclick="detail('${r.ip_address}')"
+                                                >
+                                                    دستگاه فعلی
+                                                </button>`
+
+                                                :
+
+                                                ""
+                                            }
+
+                                        </td>
+
+                                    </tr>
+
+                                    `;
+                                }
+                            )
+                            .join('')
+                        }
+
+                    </table>
+
+                </div>
+
+            </div>
+        `;
+
+    }
+    catch(e){
+
+        alert(
+            "خطا در تاریخچه: " +
+            e.message
+        );
+    }
+}
+
+
+/* ============================================================
+   Snapshot
+   ============================================================ */
+
+function showSnapshot(
+    encoded
+){
+
+    let data = {};
+
+    try{
+
+        data =
+            JSON.parse(
+                encoded
+            );
+
+    }
+    catch{
+
+        data = {
+            raw:
+                encoded
+        };
+    }
+
+    app.innerHTML = `
+
+        <div class="card">
+
+            <button
+                class="btn"
+                onclick="loadHome()"
+            >
+                بازگشت
+            </button>
+
+            <h2>
+                📦 Snapshot تاریخی
+            </h2>
+
+        </div>
+
+        <div class="card">
+
+            <div class="raw">
+                ${h(
+                    JSON.stringify(
+                        data,
+                        null,
+                        2
+                    )
+                )}
+            </div>
+
+        </div>
+    `;
+}
+
+
+/* ============================================================
+   Device Detail
+   ============================================================ */
+
+async function detail(
+    ip
+){
+
+    try{
+
+        current =
+            await api(
+                "/api/device/" +
+                encodeURIComponent(ip)
+            );
+
+        renderDeviceDetail();
+
+    }
+    catch(e){
+
+        alert(
+            "خطا در دریافت دستگاه: " +
+            e.message
+        );
+    }
+}
+
+function renderDeviceDetail(){
+
+    const d = current || {};
+
+    const isFull =
+        ME &&
+        ME.role === "full";
+
+    const tabs = isFull
+        ? [
+            {
+                key: "general",
+                title: "اطلاعات اصلی"
+            },
+            {
+                key: "wireless",
+                title: "اطلاعات وایرلس"
+            },
+            {
+                key: "registration",
+                title: "Wireless Registration"
+            },
+            {
+                key: "interfaces",
+                title: "Interfaces"
+            },
+            {
+                key: "cpu",
+                title: "CPU / Memory"
+            },
+            {
+                key: "iproute",
+                title: "IP / Route"
+            },
+            {
+                key: "bridge",
+                title: "Bridge / Radio"
+            },
+            {
+                key: "pppoe",
+                title: "PPPoE / VPN"
+            }
+        ]
+        : [
+            {
+                key: "general",
+                title: "اطلاعات اصلی"
+            },
+            {
+                key: "wireless",
+                title: "اطلاعات وایرلس"
+            }
+        ];
+
+    app.innerHTML = `
+
+        <div class="card">
+
+            <button
+                class="btn"
+                onclick="loadHome()"
+            >
+                بازگشت
+            </button>
+
+            <h2>
+                📡 ${h(d.ip_address)}
+                —
+                ${h(d.hostname)}
+            </h2>
+
+            <div class="tabs">
+
+                ${
+                    tabs
+                    .map(
+                        (x, i) => `
+
+                        <button
+                            class="tab ${
+                                i === 0
+                                ? "active"
+                                : ""
+                            }"
+                            onclick="tab('${x.key}', this)"
+                        >
+                            ${x.title}
+                        </button>
+
+                        `
+                    )
+                    .join('')
+                }
+
+            </div>
+
+            <div id="tabbody"></div>
+
+        </div>
+    `;
+
+    tab(
+        "general",
+        document.querySelector(".tab")
+    );
+}
+
+
+/* ============================================================
+   Tabs
+   ============================================================ */
+
+function tab(
+    name,
+    el
+){
+
+    document
+    .querySelectorAll(
+        ".tab"
+    )
+    .forEach(
+        x =>
+            x.classList.remove(
+                "active"
+            )
+    );
+
+    if(el){
+
+        el.classList.add(
+            "active"
+        );
+    }
+
+    const d =
+        current || {};
+
+    if(
+        name === "general"
+    ){
+
+        renderGeneral(
+            d
+        );
+
+        return;
+    }
+
+    const sets = {
+
+        wireless: [
+
+            [
+                "SSID",
+                d.ssid
+            ],
+
+            [
+                "Frequency",
+                d.frequency
+            ],
+
+            [
+                "TX Power",
+                d.tx_power
+            ],
+
+            [
+                "RX Power",
+                d.rx_power
+            ],
+
+            [
+                "Signal",
+                d.signal_strength
+            ],
+
+            [
+                "Channel",
+                d.channel
+            ],
+
+            [
+                "Bandwidth",
+                d.bandwidth
+            ],
+
+            [
+                "Mode",
+                d.mode
+            ],
+
+            [
+                "Noise Floor",
+                d.noise_floor
+            ],
+
+            [
+                "CCQ",
+                d.ccq
+            ]
+
+        ],
+
+        registration: [
+
+            [
+                "Wireless Registration",
+                d.wireless_registration
+            ]
+
+        ],
+
+        interfaces: [
+
+            [
+                "Interfaces",
+                d.interfaces
+            ]
+
+        ],
+
+        cpu: [
+
+            [
+                "CPU / Memory / Health",
+                d.cpu_memory
+            ]
+
+        ],
+
+        iproute: [
+
+            [
+                "IP / Routes",
+                d.ip_routes
+            ]
+
+        ],
+
+        bridge: [
+
+            [
+                "Bridge / Radio",
+                d.bridges
+            ]
+
+        ],
+
+        pppoe: [
+
+            [
+                "PPPoE / VPN",
+                d.pppoe_vpn
+            ]
+
+        ]
+
+    };
+
+    const rows =
+        sets[name] || [];
+
+    document.getElementById(
+        "tabbody"
+    ).innerHTML = `
+
+        <div class="grid">
+
+            ${
+                rows
+                .map(
+                    ([k,v]) => `
+
+                    <div class="card">
+
+                        <b>
+                            ${h(k)}
+                        </b>
+
+                        <div class="${
+                            String(v || "")
+                            .includes("\n")
+                            ? "raw"
+                            : ""
+                        }">
+
+                            ${h(
+                                v || "-"
+                            )}
+
+                        </div>
+
+                    </div>
+
+                    `
+                )
+                .join('')
+            }
+
+        </div>
+
+        ${
+    ME && ME.role === "full"
+    ?
+    `
+    <div class="card">
+
+        <b>
+            Raw Data
+        </b>
+
+        <div class="raw">
+            ${h(
+                d.raw_data || "-"
+            )}
+        </div>
+
+    </div>
+    `
+    :
+    ""
+}
+    `;
+}
+
+
+/* ============================================================
+   General + Manual Edit
+   ============================================================ */
+
+function renderGeneral(
+    d
+){
+
+    const isFull =
+        ME &&
+        ME.role === "full";
+
+    document.getElementById(
+        "tabbody"
+    ).innerHTML = `
+
+        <div class="card">
+
+            <h3>
+                📡 اطلاعات دستگاه
+            </h3>
+
+            <div class="grid">
+
+                <div class="card">
+                    <b>IP Address</b>
+                    <div>
+                        ${h(d.ip_address)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>Hostname</b>
+                    <div>
+                        ${h(d.hostname)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>Vendor</b>
+                    <div>
+                        ${h(d.vendor)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>Model</b>
+                    <div>
+                        ${h(d.model)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>Firmware</b>
+                    <div>
+                        ${h(d.firmware_version)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>Serial</b>
+                    <div>
+                        ${h(d.serial_number)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>MAC</b>
+                    <div>
+                        ${h(d.mac_address)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <b>Uptime</b>
+                    <div>
+                        ${h(d.uptime)}
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>
+                ✏️ اطلاعات آنتن
+            </h3>
+
+            </p>
+
+            <div class="form-grid">
+
+                <div class="field">
+                    <label>
+                        Latitude
+                    </label>
+
+                    <input
+                        id="manual_latitude"
+                        value="${h(
+                            d.manual_latitude ||
+                            d.latitude ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+                </div>
+
+
+                <div class="field">
+
+                    <label>
+                        Longitude
+                    </label>
+
+                    <input
+                        id="manual_longitude"
+                        value="${h(
+                            d.manual_longitude ||
+                            d.longitude ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+
+                </div>
+
+
+                <div class="field">
+
+                    <label>
+                        Province
+                    </label>
+
+                    <input
+                        id="manual_province"
+                        value="${h(
+                            d.manual_province ||
+                            d.province ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+
+                </div>
+
+
+                <div class="field">
+
+                    <label>
+                        City
+                    </label>
+
+                    <input
+                        id="manual_city"
+                        value="${h(
+                            d.manual_city ||
+                            d.city ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+
+                </div>
+
+
+                <div class="field">
+
+                    <label>
+                        Antenna Gain
+                    </label>
+
+                    <input
+                        id="manual_antenna_gain"
+                        value="${h(
+                            d.manual_antenna_gain ||
+                            d.antenna_gain ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+
+                </div>
+
+
+                <div class="field">
+
+                    <label>
+                        Polarization
+                    </label>
+
+                    <input
+                        id="manual_polarization"
+                        value="${h(
+                            d.manual_polarization ||
+                            d.polarization ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+
+                </div>
+
+
+                <div class="field">
+
+                    <label>
+                        Capacity
+                    </label>
+
+                    <input
+                        id="manual_capacity"
+                        value="${h(
+                            d.manual_capacity ||
+                            d.capacity ||
+                            ""
+                        )}"
+                        ${!isFull ? "disabled" : ""}
+                    >
+
+                </div>
+
+            </div>
+
+
+            ${
+                isFull
+
+                ?
+
+                `
+
+                <div
+                    style="margin-top:16px"
+                >
+
+                    <button
+                        class="btn primary"
+                        onclick="saveManualData()"
+                    >
+                        💾 ذخیره اطلاعات دستی
+                    </button>
+
+                </div>
+
+                `
+
+                :
+
+                `
+
+                <div
+                    class="muted"
+                    style="margin-top:16px"
+                >
+                    کاربر View امکان ویرایش ندارد.
+                </div>
+
+                `
+            }
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>
+                وضعیت اطلاعات
+            </h3>
+
+            <div>
+
+                <span class="manual-badge">
+                    Manual
+                </span>
+
+            </div>
+
+            <br>
+
+            <div>
+
+                <span class="auto-badge">
+                    Scanner
+                </span>
+
+            </div>
+
+        </div>
+        ${
+    ME && ME.role === "full"
+    ?
+    `
+    <div class="card">
+
+        <b>
+            Raw Data
+        </b>
+
+        <div class="raw">
+            ${h(
+                d.raw_data || "-"
+            )}
+        </div>
+
+    </div>
+    `
+    :
+    ""
+}
+
+        
+    `;
+}
+
+
+/* ============================================================
+   Save Manual Data
+   ============================================================ */
+
+async function saveManualData(){
+
+    if(
+        !current ||
+        !current.ip_address
+    ){
+
+        return;
+    }
+
+    const body = {
+
+        latitude:
+            document.getElementById(
+                "manual_latitude"
+            ).value,
+
+        longitude:
+            document.getElementById(
+                "manual_longitude"
+            ).value,
+
+        province:
+            document.getElementById(
+                "manual_province"
+            ).value,
+
+        city:
+            document.getElementById(
+                "manual_city"
+            ).value,
+
+        antenna_gain:
+            document.getElementById(
+                "manual_antenna_gain"
+            ).value,
+
+        polarization:
+            document.getElementById(
+                "manual_polarization"
+            ).value,
+
+        capacity:
+            document.getElementById(
+                "manual_capacity"
+            ).value
+    };
+
+    try{
+
+        current =
+            await api(
+                "/api/device/" +
+                encodeURIComponent(
+                    current.ip_address
+                ) +
+                "/manual",
+                {
+                    method:
+                        "PUT",
+                    body:
+                        JSON.stringify(
+                            body
+                        )
+                }
+            );
+
+        alert(
+            "اطلاعات دستی ذخیره شد ✅"
+        );
+
+        renderDeviceDetail();
+
+    }
+    catch(e){
+
+        alert(
+            "خطا در ذخیره اطلاعات: " +
+            e.message
+        );
+    }
+}
+
+
+/* ============================================================
+   Admin
+   ============================================================ */
+
+function openAdmin(){
+
+    app.innerHTML = `
+
+        <div class="card">
+
+            <button
+                class="btn"
+                onclick="loadHome()"
+            >
+                بازگشت
+            </button>
+
+            <h2>
+                ⚙ مدیریت
+            </h2>
+
+            <div class="grid">
+
+                <div class="card">
+
+                    <h3>
+                        Blacklist
+                    </h3>
+
+                    <input
+                        id="be"
+                        placeholder="IP یا CIDR"
+                    >
+
+                    <br><br>
+
+                    <input
+                        id="bd"
+                        placeholder="توضیح"
+                    >
+
+                    <br><br>
+
+                    <button
+                        class="btn danger"
+                        onclick="addBL()"
+                    >
+                        افزودن
+                    </button>
+
+                    <div
+                        id="bl"
+                    ></div>
+
+                </div>
+
+
+                <div class="card">
+
+                    <h3>
+                        Manual IP
+                    </h3>
+
+                    <input
+                        id="mi"
+                        placeholder="IP"
+                    >
+
+                    <br><br>
+
+                    <input
+                        id="md"
+                        placeholder="توضیح"
+                    >
+
+                    <br><br>
+
+                    <button
+                        class="btn primary"
+                        onclick="addMI()"
+                    >
+                        افزودن
+                    </button>
+
+                    <div
+                        id="mil"
+                    ></div>
+
+                </div>
+
+
+                <div class="card">
+
+                    <h3>
+                        User
+                    </h3>
+
+                    <input
+                        id="un"
+                        placeholder="username"
+                    >
+
+                    <br><br>
+
+                    <input
+                        id="up"
+                        type="password"
+                        placeholder="password"
+                    >
+
+                    <br><br>
+
+                    <select id="ur">
+
+                        <option value="view">
+                            View
+                        </option>
+
+                        <option value="full">
+                            Full
+                        </option>
+
+                    </select>
+
+                    <br><br>
+
+                    <button
+                        class="btn primary"
+                        onclick="addUser()"
+                    >
+                        افزودن
+                    </button>
+
+                    <div
+                        id="ul"
+                    ></div>
+
+                </div>
+
+            </div>
+
+        </div>
+    `;
+
+    renderAdmin();
+}
+
+
+async function renderAdmin(){
+
+    try{
+
+        const [
+            b,
+            m,
+            u
+        ] = await Promise.all([
+
+            api(
+                "/api/blacklist"
+            ),
+
+            api(
+                "/api/manual-ips"
+            ),
+
+            api(
+                "/api/users"
+            )
+
+        ]);
+
+        document.getElementById(
+            "bl"
+        ).innerHTML =
+
+            b
+            .map(
+                x => `
+
+                    <p>
+
+                        ${h(x.entry)}
+
+                        <button
+                            class="btn"
+                            onclick="delBL(${x.id})"
+                        >
+                            حذف
+                        </button>
+
+                    </p>
+                `
+            )
+            .join('');
+
+
+        document.getElementById(
+            "mil"
+        ).innerHTML =
+
+            m
+            .map(
+                x => `
+
+                    <p>
+
+                        ${h(
+                            x.ip_address
+                        )}
+
+                        <button
+                            class="btn"
+                            onclick="delMI(${x.id})"
+                        >
+                            حذف
+                        </button>
+
+                    </p>
+                `
+            )
+            .join('');
+
+
+        document.getElementById(
+            "ul"
+        ).innerHTML =
+
+            u
+            .map(
+                x => `
+
+                    <p>
+
+                        ${h(
+                            x.username
+                        )}
+
+                        —
+                        ${h(
+                            x.role
+                        )}
+
+                        <button
+                            class="btn"
+                            onclick="delU(${x.id})"
+                        >
+                            حذف
+                        </button>
+
+                    </p>
+                `
+            )
+            .join('');
+
+    }
+    catch(e){
+
+        alert(
+            "خطا: " +
+            e.message
+        );
+    }
+}
+
+
+/* ============================================================
+   Admin Actions
+   ============================================================ */
+
+async function addBL(){
+
+    try{
+
+        await api(
+            "/api/blacklist",
+            {
+                method:
+                    "POST",
+
+                body:
+                    JSON.stringify({
+                        entry:
+                            document.getElementById(
+                                "be"
+                            ).value,
+
+                        description:
+                            document.getElementById(
+                                "bd"
+                            ).value
+                    })
+            }
+        );
+
+        renderAdmin();
+
+    }
+    catch(e){
+
+        alert(
+            e.message
+        );
+    }
+}
+
+
+async function delBL(
+    id
+){
+
+    try{
+
+        await api(
+            "/api/blacklist/" +
+            id,
+            {
+                method:
+                    "DELETE"
+            }
+        );
+
+        renderAdmin();
+
+    }
+    catch(e){
+
+        alert(
+            e.message
+        );
+    }
+}
+
+
+async function addMI(){
+
+    try{
+
+        await api(
+            "/api/manual-ips",
+            {
+                method:
+                    "POST",
+
+                body:
+                    JSON.stringify({
+                        ip_address:
+                            document.getElementById(
+                                "mi"
+                            ).value,
+
+                        description:
+                            document.getElementById(
+                                "md"
+                            ).value
+                    })
+            }
+        );
+
+        renderAdmin();
+
+    }
+    catch(e){
+
+        alert(
+            e.message
+        );
+    }
+}
+
+
+async function delMI(
+    id
+){
+
+    try{
+
+        await api(
+            "/api/manual-ips/" +
+            id,
+            {
+                method:
+                    "DELETE"
+            }
+        );
+
+        renderAdmin();
+
+    }
+    catch(e){
+
+        alert(
+            e.message
+        );
+    }
+}
+
+
+async function addUser(){
+
+    try{
+
+        await api(
+            "/api/users",
+            {
+                method:
+                    "POST",
+
+                body:
+                    JSON.stringify({
+                        username:
+                            document.getElementById(
+                                "un"
+                            ).value,
+
+                        password:
+                            document.getElementById(
+                                "up"
+                            ).value,
+
+                        role:
+                            document.getElementById(
+                                "ur"
+                            ).value
+                    })
+            }
+        );
+
+        renderAdmin();
+
+    }
+    catch(e){
+
+        alert(
+            e.message
+        );
+    }
+}
+
+
+async function delU(
+    id
+){
+
+    try{
+
+        await api(
+            "/api/users/" +
+            id,
+            {
+                method:
+                    "DELETE"
+            }
+        );
+
+        renderAdmin();
+
+    }
+    catch(e){
+
+        alert(
+            e.message
+        );
+    }
+}
+
+
+/* ============================================================
+   Start
+   ============================================================ */
+
+login();
+
+</script>
+
+</body>
+
+</html>
