@@ -237,6 +237,7 @@ def merge_missing(data, extra):
     return data
 
 
+
 # ============================================================
 # Credential Handling - SSH
 # ============================================================
@@ -1419,15 +1420,27 @@ def mikrotik_radio_oids(client):
 
     return discovered, raw
 
+MIKROTIK_WL_AP_TX_STRENGTH = "1.3.6.1.4.1.14988.1.1.1.3.1.10"
+
 
 def mikrotik_snmp_radio(client, ip):
     """Use RouterOS print oid output to query device-specific SNMP values."""
     oids, raw_oid = mikrotik_radio_oids(client)
+    #if MIKROTIK_WL_AP_TX_STRENGTH:
+    #    oids["tx-strength"] = MIKROTIK_WL_AP_TX_STRENGTH
+    if not oids:
+        oids = {}
+    
+    # TX Power
+    oids["tx-strength"] = "1.3.6.1.4.1.14988.1.1.1.3.1.10"
+    
+    # RX Power
+    oids["rx-power"] = "1.3.6.1.4.1.14988.1.1.1.2.1.3"
     if not oids:
         return {}, {"oid_discovery": raw_oid}
 
     wanted = {
-        "tx_power": ["tx-power", "txpower"],
+        "tx_power": ["tx-power", "txpower", "tx-strength"],
         "receive_power": ["rx-power", "receive-power", "rxpower"],
         "signal_strength": ["signal-strength", "signal"],
         "noise_floor": ["noise-floor"],
@@ -1529,11 +1542,11 @@ def mikrotik_wireless_monitor(client):
     data["frequency"] = first_nonempty(
         merged.get("frequency"),
     )
-    data["tx_power"] = first_nonempty(
-        merged.get("tx-power"),
-        merged.get("txpower"),
-        merged.get("output-power"),
-    )
+    #data["tx_power"] = first_nonempty(
+    #    merged.get("tx-power"),
+    #    merged.get("txpower"),
+    #    merged.get("output-power"),
+    #)
     data["receive_power"] = first_nonempty(
         merged.get("rx-power"),
         merged.get("receive-power"),
@@ -1663,15 +1676,15 @@ def routeros_info(ip, client):
         )
 
     raw_wireless = wireless or wifi
-
+    
     kv = parse_key_values(raw_wireless)
 
     data["ssid"] = kv.get("ssid", "")
     data["frequency"] = kv.get("frequency", "")
-    data["tx_power"] = first_nonempty(
-        kv.get("tx-power"),
-        kv.get("tx-power-mode"),
-    )
+#    data["tx_power"] = first_nonempty(
+#        kv.get("tx-power"),
+#        kv.get("tx-power-mode"),
+#    )
     data["mac_address"] = normalize_mac(
         kv.get("mac-address", "")
     )
@@ -1739,134 +1752,129 @@ def routeros_info(ip, client):
     # --------------------------------------------------------
     # Device-specific SNMP fallback
     # --------------------------------------------------------
+    # --------------------------------------------------------
+    # SNMP
+    # --------------------------------------------------------
     if SNMP_ENABLED:
         try:
+            snmp_data, snmp_raw = mikrotik_snmp_radio(client, ip)
+            merge_missing(data, snmp_data)
+            data["snmp_raw"] = snmp_raw
+        except Exception as e:
+            logger.error(f"SNMP query failed: {e}")
+
     # ----------------------------------------------------
     # First detect whether the device is Mimosa C5c
     # ----------------------------------------------------
-    
-            mimosa_detect = detect_mimosa_c5c(ip)
-    
-            if mimosa_detect.get("is_mimosa"):
-    # ----------------------------------------------
-    # Mimosa C5c -> direct SNMP
-    # ----------------------------------------------
-    
-                snmp_radio, snmp_radio_raw = (
-                    mimosa_c5c_snmp_radio(ip)
-    )
-    
-                merge_missing(
-                    data,
-                snmp_radio,
-    )
-    
-            else:
-    # ----------------------------------------------
-    # MikroTik -> existing SSH/RouterOS discovery
-    # ----------------------------------------------
-    
-                snmp_radio, snmp_radio_raw = (
-                    mikrotik_snmp_radio(
-                    client,
-                    ip,
-    )
-    )
-    
-                merge_missing(
-                    data,
-                snmp_radio,
-    )
-    
-        except Exception:
-                snmp_radio = {}
-                snmp_radio_raw = {}
-    
+    mimosa_detect = detect_mimosa_c5c(ip)
+
+    try:
+        if mimosa_detect.get("is_mimosa"):
+            # ----------------------------------------------
+            # Mimosa C5c -> direct SNMP
+            # ----------------------------------------------
+            snmp_radio, snmp_radio_raw = mimosa_c5c_snmp_radio(ip)
+            merge_missing(data, snmp_radio)
+        else:
+            # ----------------------------------------------
+            # MikroTik -> existing SSH/RouterOS discovery
+            # ----------------------------------------------
+            snmp_radio, snmp_radio_raw = mikrotik_snmp_radio(client, ip)
+            merge_missing(data, snmp_radio)
+    except Exception:
+        snmp_radio = {}
+        snmp_radio_raw = {}
+
     # --------------------------------------------------------
     # Other RouterOS data
     # --------------------------------------------------------
-    
+
     interfaces = run_cmd(
-                    client,
-    "/interface print detail without-paging",
+        client,
+        "/interface print detail without-paging",
     )
-    
+
     routes = run_cmd(
-                    client,
-    "/ip route print detail without-paging",
+        client,
+        "/ip route print detail without-paging",
     )
-    
+
     bridges = run_cmd(
-                    client,
-    "/interface bridge print detail without-paging",
+        client,
+        "/interface bridge print detail without-paging",
     )
-    
+
     pppoe = run_cmd(
-                    client,
-    "/interface pppoe-client print detail without-paging",
+        client,
+        "/interface pppoe-client print detail without-paging",
     )
-    
+
     l2tp = run_cmd(
-                    client,
-    "/interface l2tp-client print detail without-paging",
+        client,
+        "/interface l2tp-client print detail without-paging",
     )
-    
+
     sstp = run_cmd(
-                    client,
-    "/interface sstp-client print detail without-paging",
+        client,
+        "/interface sstp-client print detail without-paging",
     )
-    
+
     ovpn = run_cmd(
-                    client,
-    "/interface ovpn-client print detail without-paging",
+        client,
+        "/interface ovpn-client print detail without-paging",
     )
-    
+
     data["interfaces"] = interfaces
     data["ip_routes"] = routes
     data["bridges"] = bridges
+
     data["pppoe_vpn"] = (
-    pppoe + "\n" + l2tp + "\n" + sstp + "\n" + ovpn
+        pppoe
+        + "\n"
+        + l2tp
+        + "\n"
+        + sstp
+        + "\n"
+        + ovpn
     ).strip()
-    
+
     data["receive_power"] = data.get(
-    "receive_power",
-    "",
+        "receive_power",
+        "",
     )
-    
+
     data["serial_number"] = first_nonempty(
-    first_value(
-    resource,
-    "serial-number",
-    "serial",
-    ),
-    data.get("mac_address"),
+        first_value(
+            resource,
+            "serial-number",
+            "serial",
+        ),
+        data.get("mac_address"),
     )
-    
+
     data["scan_status"] = "success"
-    
+
     # --------------------------------------------------------
     # Build Raw Data without changing DB schema
     # --------------------------------------------------------
-    
+
     raw = {
-    "identity": identity,
-    "resource": resource,
-    "wireless": wireless,
-    "wifi": wifi,
-    "wireless_monitor": monitor_raw,
-    "registration": registration,
-    "snmp_radio": snmp_radio_raw,
-    "source_priority": "ssh -> wireless-monitor -> registration -> snmp",
+        "identity": identity,
+        "resource": resource,
+        "wireless": wireless,
+        "wifi": wifi,
+        "wireless_monitor": monitor_raw,
+        "registration": registration,
+        "snmp_radio": snmp_radio_raw,
+        "source_priority": "ssh -> wireless-monitor -> registration -> snmp",
     }
-    
+
     data["raw_data"] = json.dumps(
-    raw,
-    ensure_ascii=False,
+        raw,
+        ensure_ascii=False,
     )
-    
+
     return data
-
-
 # ============================================================
 # Cisco
 # ============================================================
