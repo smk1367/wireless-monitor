@@ -15,7 +15,27 @@
 </title>
 
 <style>
+.header-row {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #ffffff; 
+}
 
+.header-row h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  display: inline;
+}
+
+.logo {
+  height: 60px;
+  width: auto;
+  object-fit: contain;
+  display: inline-block;
+}
 body{
     font-family:Tahoma,Arial,sans-serif;
     background:#0f172a;
@@ -37,6 +57,11 @@ body{
     margin-bottom:16px
 }
 
+.card-header {
+    background: #ffffff;
+    color: #000000;
+    border-color: #e5e7eb;
+}
 .toolbar,
 .tabs,
 .row{
@@ -313,7 +338,7 @@ function login(){
         >
 
             <h2>
-                🔐 ورود
+                 ورود به سیستم
             </h2>
 
             <input
@@ -467,21 +492,27 @@ async function loadHome(){
          * صفحه اصلی
          */
 
-        app.innerHTML = `
+        
+         app.innerHTML = `
+          
 
             <div class="card">
+                <div class="card card-header">
 
-                <h1>
-                    📡 SMK_WIRELESS_SABANET
-                </h1>
+                <div class="header-row">
+                    <img src="/images/sazman.png" alt="sazman" class="logo">
+                    <h1> سامانه یکپارچه لینک های رادیویی</h1>
+                    <img src="/images/sabanet.png" alt="Sabanet" class="logo">
+                </div>
 
+                
                 <div class="muted">
                     کاربر:
                     ${h(ME?.username)}
                 </div>
 
             </div>
-
+            
 
             <div class="grid">
 
@@ -1577,12 +1608,12 @@ function tab(
 
             [
                 "TX Power",
-                d.tx_power
+                d.tx_power || d.tx_power_configured || d.tx_power_effective || "—"
             ],
 
             [
                 "RX Power",
-                d.rx_power
+                d.rx_power || d.receive_power || d.signal_strength || "—"
             ],
 
             [
@@ -1603,6 +1634,16 @@ function tab(
             [
                 "Mode",
                 d.mode
+            ],
+
+            [
+                "Peer TX Signal",
+                d.peer_tx_signal_strength
+            ],
+
+            [
+                "TX Power Mode",
+                d.tx_power_mode
             ],
 
             [
