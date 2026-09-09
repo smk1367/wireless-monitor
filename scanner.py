@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+import asyncio
+import concurrent.futures
+import hashlib
 import ipaddress
 import json
-import time
+import logging
+import os
 import re
-import socket
-import concurrent.futures
-import subprocess
 import shutil
-import asyncio
+import socket
+import subprocess
+import time
 
 import paramiko
 
@@ -37,142 +39,110 @@ from database import (
 
 
 # ============================================================
+# Logging
+# ============================================================
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
 # Configuration
 # ============================================================
 
-NETWORK = os.getenv(
-    "SCAN_NETWORK",
-    "172.17.240.0/20",
-)
+NETWORK = os.getenv("SCAN_NETWORK", "172.17.240.0/20")
+SSH_PORT = int(os.getenv("SSH_PORT", "22"))
+SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "10"))
+SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "40"))
 
-SSH_PORT = int(
-    os.getenv("SSH_PORT", "22")
-)
+LEGACY_SSH_FALLBACK = os.getenv("LEGACY_SSH_FALLBACK", "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
-SSH_TIMEOUT = int(
-    os.getenv("SSH_TIMEOUT", "10")
-)
+SNMP_ENABLED = os.getenv("SNMP_ENABLED", "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+SNMP_PORT = int(os.getenv("SNMP_PORT", "161"))
+SNMP_VERSION = os.getenv("SNMP_VERSION", "2c").strip().lower()
+SNMP_TIMEOUT = float(os.getenv("SNMP_TIMEOUT", "2.5"))
+SNMP_RETRIES = int(os.getenv("SNMP_RETRIES", "1"))
+SNMP_COMMUNITY = os.getenv("SNMP_COMMUNITY", "ngstehwl")
 
-SCAN_WORKERS = int(
-    os.getenv("SCAN_WORKERS", "40")
-)
 
-LEGACY_SSH_FALLBACK = os.getenv(
-    "LEGACY_SSH_FALLBACK",
-    "1",
-).strip().lower() in (
-    "1", "true", "yes", "on",
-)
-
-# ------------------------------------------------------------
-# SNMP
-# ------------------------------------------------------------
-
-SNMP_ENABLED = os.getenv(
-    "SNMP_ENABLED",
-    "1",
-).strip().lower() in (
-    "1", "true", "yes", "on",
-)
-
-SNMP_PORT = int(
-    os.getenv("SNMP_PORT", "161")
-)
-
-SNMP_VERSION = os.getenv(
-    "SNMP_VERSION",
-    "2c",
-).strip().lower()
-
-SNMP_TIMEOUT = float(
-    os.getenv("SNMP_TIMEOUT", "2.5")
-)
-
-SNMP_RETRIES = int(
-    os.getenv("SNMP_RETRIES", "1")
-)
-
-SNMP_COMMUNITY = os.getenv(
-    "SNMP_COMMUNITY",
-    "ngstehwl",
-)
-
-SNMP_CREDENTIALS = [
-    {
-        "id": "default",
-        "community": SNMP_COMMUNITY,
-    }
-]
 # ============================================================
-# Helpers
+# Generic helpers
 # ============================================================
-
 
 def safe_text(value):
     if value is None:
         return ""
     if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
+        return value.decode("utf-8", "replace").strip()
     return str(value).strip()
 
 
 def missing(value):
     if value is None:
         return True
-    return not str(value).strip() or str(value).strip() in {
-        "-",
-        "--",
-        "N/A",
-        "n/a",
-        "unknown",
-        "Unknown",
-        "none",
-        "None",
+    text = safe_text(value)
+    return text.lower() in {
+        "", "-", "--", "n/a", "unknown", "none", "null"
     }
 
 
 def first_nonempty(*values):
     for value in values:
         if not missing(value):
-            return str(value).strip()
+            return safe_text(value)
     return ""
 
 
 def normalize_number_unit(value, default_unit=""):
-    value = safe_text(value)
-    if not value:
+    text = safe_text(value)
+    if not text:
         return ""
-    if default_unit and re.fullmatch(r"-?\d+(?:\.\d+)?", value):
-        return f"{value} {default_unit}"
-    return value
+    if default_unit and re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        return f"{text} {default_unit}"
+    return text
+
+
+def normalize_dbm(value):
+    text = safe_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"\s*dBm\s*$", "", text, flags=re.I).strip()
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        return f"{text} dBm"
+    return safe_text(value)
 
 
 def parse_key_values(text):
-    """Parse RouterOS-style key=value and key: value data."""
+    """Parse RouterOS key=value / key: value output safely."""
     out = {}
     if not text:
         return out
 
-    # The pattern above intentionally also allows plain values.  For
-    # RouterOS output, line-by-line parsing is more reliable for quoted
-    # strings containing spaces.
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
 
-        for m in re.finditer(
+        # key="quoted value"
+        for match in re.finditer(
             r"([A-Za-z][A-Za-z0-9_.-]*)\s*(?:=|:)\s*"
             r"(?:\"([^\"]*)\"|'([^']*)'|([^\s;]+))",
             line,
         ):
-            key = m.group(1).lower()
+            key = match.group(1).lower()
             value = next(
-                (
-                    x for x in (m.group(2), m.group(3), m.group(4))
-                    if x is not None
-                ),
-                "",
+                x for x in (
+                    match.group(2),
+                    match.group(3),
+                    match.group(4),
+                ) if x is not None
             )
             out[key] = value.strip()
 
@@ -189,7 +159,6 @@ def first_value(text, *keys):
         if not missing(value):
             return value
 
-    # Fallback for lines such as "Version: 7.14" or "name: router".
     for key in keys:
         pattern = re.compile(
             rf"^\s*{re.escape(str(key))}\s*[:=]\s*(.+?)\s*$",
@@ -207,28 +176,22 @@ def normalize_mac(value):
     if not value:
         return ""
 
-    # RouterOS often returns AA:BB:CC:DD:EE:FF directly.
     if re.fullmatch(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}", value):
         return value.upper()
 
-    # SNMP may return 6 raw octets as a printable representation.
+    if re.fullmatch(r"[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}", value):
+        raw = value.replace(".", "")
+        return ":".join(raw[i:i + 2].upper() for i in range(0, 12, 2))
+
     hex_pairs = re.findall(r"[0-9A-Fa-f]{2}", value)
     if len(hex_pairs) == 6:
         return ":".join(x.upper() for x in hex_pairs)
-
-    # Cisco style xxxx.xxxx.xxxx
-    if re.fullmatch(r"[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}", value):
-        raw = value.replace(".", "")
-        return ":".join(
-            raw[i:i + 2].upper()
-            for i in range(0, 12, 2)
-        )
 
     return value
 
 
 def merge_missing(data, extra):
-    """Fill only empty fields; existing SSH data wins."""
+    """Only fill blank fields. Useful for general enrichment."""
     for key, value in (extra or {}).items():
         if key.startswith("_"):
             continue
@@ -237,53 +200,67 @@ def merge_missing(data, extra):
     return data
 
 
+def merge_runtime(data, runtime, fields):
+    """Runtime wireless values must replace stale/static values."""
+    for field in fields:
+        value = runtime.get(field)
+        if not missing(value):
+            data[field] = value
+    return data
+
+
+def channel_parts(channel):
+    """5855/20-Ceee/ac -> (5855, 20 MHz)."""
+    channel = safe_text(channel)
+    if not channel:
+        return "", ""
+
+    match = re.match(
+        r"^\s*(\d+(?:\.\d+)?)"
+        r"(?:/(\d+(?:\.\d+)?))?",
+        channel,
+    )
+    if not match:
+        return "", ""
+
+    frequency = match.group(1)
+    bandwidth = (
+        f"{match.group(2)} MHz"
+        if match.group(2)
+        else ""
+    )
+    return frequency, bandwidth
+
 
 # ============================================================
-# Credential Handling - SSH
+# Credentials
 # ============================================================
-
 
 def _credentials():
     out = []
 
-    try:
-        raw = os.getenv(
-            "SSH_CREDENTIALS_JSON",
-            "",
-        ).strip()
-        if raw:
+    raw = os.getenv("SSH_CREDENTIALS_JSON", "").strip()
+    if raw:
+        try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
                 for item in parsed:
                     if not isinstance(item, dict):
                         continue
-                    username = str(
-                        item.get("username", "")
-                    ).strip()
-                    password = str(
-                        item.get("password", "")
-                    )
+                    username = safe_text(item.get("username"))
+                    password = safe_text(item.get("password"))
                     if username:
                         out.append({
                             "username": username,
                             "password": password,
-                            "id": item.get(
-                                "id",
-                                f"json-{len(out)+1}",
-                            ),
+                            "id": item.get("id", f"json-{len(out) + 1}"),
                         })
-    except Exception:
-        pass
+        except Exception as exc:
+            logger.warning("Invalid SSH_CREDENTIALS_JSON: %s", exc)
 
     for i in range(1, 11):
-        username = os.getenv(
-            f"SSH_USER_{i}",
-            "",
-        ).strip()
-        password = os.getenv(
-            f"SSH_PASS_{i}",
-            "",
-        )
+        username = os.getenv(f"SSH_USER_{i}", "").strip()
+        password = os.getenv(f"SSH_PASS_{i}", "")
         if username:
             out.append({
                 "username": username,
@@ -291,14 +268,8 @@ def _credentials():
                 "id": f"cred-{i}",
             })
 
-    username = os.getenv(
-        "SSH_USER",
-        "",
-    ).strip()
-    password = os.getenv(
-        "SSH_PASS",
-        "",
-    )
+    username = os.getenv("SSH_USER", "").strip()
+    password = os.getenv("SSH_PASS", "")
     if username:
         out.append({
             "username": username,
@@ -308,34 +279,21 @@ def _credentials():
 
     uniq = []
     seen = set()
-    for credential in out:
-        key = (
-            credential.get("username", ""),
-            credential.get("password", ""),
-        )
-        if key not in seen and key[0]:
-            uniq.append(credential)
+    for item in out:
+        key = (item["username"], item["password"])
+        if key not in seen:
+            uniq.append(item)
             seen.add(key)
-
     return uniq
 
 
 CREDENTIALS = _credentials()
 
 
-# ============================================================
-# Credential Handling - SNMP
-# ============================================================
-
-
 def _snmp_credentials():
     out = []
 
-    raw = os.getenv(
-        "SNMP_COMMUNITIES_JSON",
-        "",
-    ).strip()
-
+    raw = os.getenv("SNMP_COMMUNITIES_JSON", "").strip()
     if raw:
         try:
             parsed = json.loads(raw)
@@ -346,22 +304,17 @@ def _snmp_credentials():
                         if community:
                             out.append({
                                 "community": community,
-                                "id": f"json-{len(out)+1}",
+                                "id": f"json-{len(out) + 1}",
                             })
                     elif isinstance(item, dict):
-                        community = str(
-                            item.get("community", "")
-                        ).strip()
+                        community = safe_text(item.get("community"))
                         if community:
                             out.append({
                                 "community": community,
-                                "id": item.get(
-                                    "id",
-                                    f"json-{len(out)+1}",
-                                ),
+                                "id": item.get("id", f"json-{len(out) + 1}"),
                             })
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Invalid SNMP_COMMUNITIES_JSON: %s", exc)
 
     if SNMP_COMMUNITY.strip():
         out.append({
@@ -372,11 +325,9 @@ def _snmp_credentials():
     uniq = []
     seen = set()
     for item in out:
-        community = item["community"]
-        if community not in seen:
+        if item["community"] not in seen:
             uniq.append(item)
-            seen.add(community)
-
+            seen.add(item["community"])
     return uniq
 
 
@@ -384,111 +335,59 @@ SNMP_CREDENTIALS = _snmp_credentials()
 
 
 # ============================================================
-# IP List
+# Host discovery
 # ============================================================
 
-
 def get_all_ips():
-    net = ipaddress.ip_network(
-        NETWORK,
-        strict=False,
-    )
-
+    network = ipaddress.ip_network(NETWORK, strict=False)
     ips = [
         str(ip)
-        for ip in net.hosts()
+        for ip in network.hosts()
         if not is_blacklisted(str(ip))
     ]
 
     for row in list_manual_ips():
         ip = row["ip_address"]
-        if (
-            row["enabled"]
-            and not is_blacklisted(ip)
-            and ip not in ips
-        ):
+        if row["enabled"] and not is_blacklisted(ip) and ip not in ips:
             ips.append(ip)
 
     return ips
 
 
-# ============================================================
-# Port / Host Alive Check
-# ============================================================
-
-
 def port_is_open(ip, port, timeout=1):
     try:
-        with socket.create_connection(
-            (ip, port),
-            timeout=timeout,
-        ):
+        with socket.create_connection((ip, port), timeout=timeout):
             return True
     except Exception:
         return False
 
 
 def host_is_alive(ip):
-    """
-    Consider host alive if:
-    1) SSH TCP port is open, or
-    2) ICMP ping responds.
-
-    SNMP is UDP, so it must NOT be checked with
-    port_is_open() / TCP socket connection.
-    """
-
-    # --------------------------------------------------------
-    # 1) SSH devices
-    # --------------------------------------------------------
-    if port_is_open(
-        ip,
-        SSH_PORT,
-        timeout=1,
-    ):
+    if port_is_open(ip, SSH_PORT, timeout=1):
         return True
 
-    # --------------------------------------------------------
-    # 2) ICMP
-    # --------------------------------------------------------
     try:
         result = subprocess.run(
-            [
-                "ping",
-                "-c",
-                "1",
-                "-W",
-                "1",
-                ip,
-            ],
+            ["ping", "-c", "1", "-W", "1", ip],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
         )
-
-        if result.returncode == 0:
-            return True
-
+        return result.returncode == 0
     except Exception:
-        pass
-
-    return False
-# ============================================================
-# Legacy OpenSSH Availability
-# ============================================================
-
-
-def legacy_ssh_available():
-    return (
-        LEGACY_SSH_FALLBACK
-        and shutil.which("ssh") is not None
-        and shutil.which("sshpass") is not None
-    )
+        return False
 
 
 # ============================================================
-# Legacy SSH Client
+# SSH clients
 # ============================================================
+
+class _LegacyOutput:
+    def __init__(self, text):
+        self.text = text if isinstance(text, str) else str(text or "")
+
+    def read(self):
+        return self.text.encode("utf-8", "replace")
 
 
 class LegacySSHClient:
@@ -519,71 +418,41 @@ class LegacySSHClient:
             "-p", str(SSH_PORT),
         ]
 
-        cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            *ssh_options,
-            f"{self.username}@{self.ip}",
-            command,
+        command_line = [
+            "sshpass", "-e", "ssh", *ssh_options,
+            f"{self.username}@{self.ip}", command,
         ]
 
         try:
             result = subprocess.run(
-                cmd,
+                command_line,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=max(timeout, SSH_TIMEOUT) + 5,
             )
-            return (
-                None,
-                _LegacyOutput(result.stdout or ""),
-                _LegacyOutput(result.stderr or ""),
-            )
-        except subprocess.TimeoutExpired as e:
-            return (
-                None,
-                _LegacyOutput(e.stdout or ""),
-                _LegacyOutput(e.stderr or ""),
-            )
+            return None, _LegacyOutput(result.stdout), _LegacyOutput(result.stderr)
+        except subprocess.TimeoutExpired as exc:
+            return None, _LegacyOutput(exc.stdout or ""), _LegacyOutput(exc.stderr or "")
         except Exception:
-            return (
-                None,
-                _LegacyOutput(""),
-                _LegacyOutput(""),
-            )
+            return None, _LegacyOutput(""), _LegacyOutput("")
 
     def close(self):
         return None
 
 
-class _LegacyOutput:
-    def __init__(self, text):
-        self.text = (
-            text
-            if isinstance(text, str)
-            else str(text or "")
-        )
-
-    def read(self):
-        return self.text.encode(
-            "utf-8",
-            "replace",
-        )
-
-
-# ============================================================
-# SSH Connection
-# ============================================================
+def legacy_ssh_available():
+    return (
+        LEGACY_SSH_FALLBACK
+        and shutil.which("ssh") is not None
+        and shutil.which("sshpass") is not None
+    )
 
 
 def ssh_connect_normal(ip, credential):
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(
-        paramiko.AutoAddPolicy()
-    )
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(
         ip,
         port=SSH_PORT,
@@ -601,109 +470,63 @@ def ssh_connect_normal(ip, credential):
 
 def ssh_connect_legacy(ip, credential):
     if not legacy_ssh_available():
-        raise RuntimeError(
-            "Legacy SSH unavailable: ssh/sshpass not installed"
-        )
+        raise RuntimeError("Legacy SSH unavailable: ssh/sshpass not installed")
 
-    client = LegacySSHClient(
-        ip,
-        credential["username"],
-        credential["password"],
-    )
-
+    client = LegacySSHClient(ip, credential["username"], credential["password"])
     _, stdout, stderr = client.exec_command(
         "/system identity print",
         timeout=SSH_TIMEOUT,
     )
-
-    output = stdout.read().decode(
-        "utf-8",
-        "replace",
-    ).strip()
-
-    error_output = stderr.read().decode(
-        "utf-8",
-        "replace",
-    ).strip()
+    output = stdout.read().decode("utf-8", "replace").strip()
+    error_output = stderr.read().decode("utf-8", "replace").strip()
 
     if not output:
-        if error_output:
-            raise RuntimeError(
-                "Legacy SSH failed: "
-                + error_output[:180]
-            )
-        raise RuntimeError("Legacy SSH failed")
+        raise RuntimeError(
+            "Legacy SSH failed"
+            + (f": {error_output[:180]}" if error_output else "")
+        )
 
     return client
 
 
 def ssh_connect(ip):
-    last_error = None
-
     if not CREDENTIALS:
-        raise ValueError(
-            "No SSH credentials configured"
-        )
+        raise ValueError("No SSH credentials configured")
+
+    last_error = None
 
     for credential in CREDENTIALS:
         try:
-            client = ssh_connect_normal(
-                ip,
-                credential,
-            )
             return (
-                client,
+                ssh_connect_normal(ip, credential),
                 f"normal:{credential.get('id', credential['username'])}",
             )
-        except Exception as e:
-            last_error = e
-            try:
-                client.close()
-            except Exception:
-                pass
+        except Exception as exc:
+            last_error = exc
 
         if LEGACY_SSH_FALLBACK:
             try:
-                client = ssh_connect_legacy(
-                    ip,
-                    credential,
-                )
                 return (
-                    client,
+                    ssh_connect_legacy(ip, credential),
                     f"legacy:{credential.get('id', credential['username'])}",
                 )
-            except Exception as e:
-                last_error = e
+            except Exception as exc:
+                last_error = exc
 
-    raise (
-        last_error
-        or RuntimeError("SSH connection failed")
-    )
-
-
-# ============================================================
-# Execute SSH Command
-# ============================================================
+    raise last_error or RuntimeError("SSH connection failed")
 
 
 def run_cmd(client, command, timeout=8):
     try:
-        _, stdout, _ = client.exec_command(
-            command,
-            timeout=timeout,
-        )
-        return stdout.read().decode(
-            "utf-8",
-            "replace",
-        ).strip()
+        _, stdout, _ = client.exec_command(command, timeout=timeout)
+        return stdout.read().decode("utf-8", "replace").strip()
     except Exception:
         return ""
 
 
 # ============================================================
-# SNMP low-level helpers
+# SNMP helpers
 # ============================================================
-
 
 async def _snmp_get_async(ip, community, oids, version="2c"):
     if not SNMP_ENABLED or SnmpDispatcher is None:
@@ -712,65 +535,45 @@ async def _snmp_get_async(ip, community, oids, version="2c"):
     results = {}
     mp_model = 0 if str(version).lower() in {"1", "v1"} else 1
 
-    async with _snmp_dispatcher_context() as dispatcher:
+    dispatcher = SnmpDispatcher()
+    try:
         target = await UdpTransportTarget.create(
             (ip, SNMP_PORT),
             timeout=SNMP_TIMEOUT,
             retries=SNMP_RETRIES,
         )
 
-        iterator = await get_cmd(
+        result = await get_cmd(
             dispatcher,
-            CommunityData(
-                community,
-                mpModel=mp_model,
-            ),
+            CommunityData(community, mpModel=mp_model),
             target,
-            *[
-                (oid, None)
-                for oid in oids
-            ],
+            *[(oid, None) for oid in oids],
         )
 
-        error_indication, error_status, error_index, var_binds = iterator
+        error_indication, error_status, error_index, var_binds = result
 
         if error_indication or error_status:
             return {}
 
         for oid, value in var_binds:
             results[safe_text(oid)] = safe_text(
-                value.prettyPrint()
-                if hasattr(value, "prettyPrint")
-                else value
+                value.prettyPrint() if hasattr(value, "prettyPrint") else value
             )
 
-    return results
-
-
-class _snmp_dispatcher_context:
-    """Compatibility context for PySNMP v7 v1arch SnmpDispatcher."""
-
-    async def __aenter__(self):
-        self.dispatcher = SnmpDispatcher()
-        return self.dispatcher
-
-    async def __aexit__(self, exc_type, exc, tb):
+        return results
+    finally:
         try:
-            self.dispatcher.close_dispatcher()
+            dispatcher.close_dispatcher()
         except Exception:
             try:
-                self.dispatcher.transport_dispatcher.close_dispatcher()
+                dispatcher.transport_dispatcher.close_dispatcher()
             except Exception:
                 pass
 
 
 def snmp_get(ip, oids, credentials=None):
     if not SNMP_ENABLED:
-        return {
-            "values": {},
-            "credential_id": "",
-            "community": "",
-        }
+        return {"values": {}, "credential_id": "", "community": ""}
 
     if SnmpDispatcher is None:
         return {
@@ -783,12 +586,11 @@ def snmp_get(ip, oids, credentials=None):
     credentials = credentials or SNMP_CREDENTIALS
 
     for credential in credentials:
-        community = credential["community"]
         try:
             values = asyncio.run(
                 _snmp_get_async(
                     ip,
-                    community,
+                    credential["community"],
                     oids,
                     version=SNMP_VERSION,
                 )
@@ -796,24 +598,14 @@ def snmp_get(ip, oids, credentials=None):
             if values:
                 return {
                     "values": values,
-                    "credential_id": credential.get(
-                        "id", "snmp"
-                    ),
-                    "community": community,
+                    "credential_id": credential.get("id", "snmp"),
+                    "community": credential["community"],
                 }
-        except Exception:
-            continue
+        except Exception as exc:
+            logger.debug("SNMP %s failed: %s", ip, exc)
 
-    return {
-        "values": {},
-        "credential_id": "",
-        "community": "",
-    }
+    return {"values": {}, "credential_id": "", "community": ""}
 
-
-# ============================================================
-# SNMP OIDs
-# ============================================================
 
 SNMP_OIDS = {
     "sysDescr": "1.3.6.1.2.1.1.1.0",
@@ -827,43 +619,22 @@ SNMP_OIDS = {
 
 
 def snmp_standard_info(ip):
-    result = snmp_get(
-        ip,
-        list(SNMP_OIDS.values()),
-    )
-
+    result = snmp_get(ip, list(SNMP_OIDS.values()))
     values = result.get("values", {})
-    by_name = {}
-    reverse = {
-        oid: name
-        for name, oid in SNMP_OIDS.items()
+    reverse = {oid: name for name, oid in SNMP_OIDS.items()}
+    by_name = {reverse.get(oid, oid): value for oid, value in values.items()}
+
+    data = {
+        "hostname": first_nonempty(by_name.get("sysName")),
+        "firmware_version": first_nonempty(by_name.get("sysDescr")),
+        "uptime": first_nonempty(by_name.get("sysUpTime")),
+        "mac_address": normalize_mac(by_name.get("ifPhysAddress.1")),
     }
-
-    for oid, value in values.items():
-        key = reverse.get(oid, oid)
-        by_name[key] = value
-
-    data = {}
-    data["hostname"] = first_nonempty(
-        by_name.get("sysName")
-    )
-    data["firmware_version"] = first_nonempty(
-        by_name.get("sysDescr")
-    )
-    data["uptime"] = first_nonempty(
-        by_name.get("sysUpTime")
-    )
-    data["mac_address"] = normalize_mac(
-        first_nonempty(
-            by_name.get("ifPhysAddress.1")
-        )
-    )
 
     raw = {
         "system": by_name,
         "credential_id": result.get("credential_id"),
     }
-
     return data, raw, result
 
 
@@ -876,55 +647,33 @@ MIMOSA_C5C_OIDS = {
     "serial_number": "1.3.6.1.4.1.43356.2.1.2.1.2.0",
     "firmware": "1.3.6.1.4.1.43356.2.1.2.1.3.0",
     "temperature": "1.3.6.1.4.1.43356.2.1.2.1.8.0",
-
     "ssid": "1.3.6.1.4.1.43356.2.1.2.3.1.0",
     "wan_mac": "1.3.6.1.4.1.43356.2.1.2.3.2.0",
-
     "wireless_mode": "1.3.6.1.4.1.43356.2.1.2.4.1.0",
-
     "local_ip": "1.3.6.1.4.1.43356.2.1.2.5.8.0",
-
-    # RF chain 1/2
     "tx_power_1": "1.3.6.1.4.1.43356.2.1.2.6.1.1.2.1",
     "tx_power_2": "1.3.6.1.4.1.43356.2.1.2.6.1.1.2.2",
-
     "rx_power_1": "1.3.6.1.4.1.43356.2.1.2.6.1.1.3.1",
     "rx_power_2": "1.3.6.1.4.1.43356.2.1.2.6.1.1.3.2",
-
     "rx_noise_1": "1.3.6.1.4.1.43356.2.1.2.6.1.1.4.1",
     "rx_noise_2": "1.3.6.1.4.1.43356.2.1.2.6.1.1.4.2",
-
     "snr_1": "1.3.6.1.4.1.43356.2.1.2.6.1.1.5.1",
     "snr_2": "1.3.6.1.4.1.43356.2.1.2.6.1.1.5.2",
-
     "frequency_1": "1.3.6.1.4.1.43356.2.1.2.6.1.1.6.1",
     "frequency_2": "1.3.6.1.4.1.43356.2.1.2.6.1.1.6.2",
-
     "polarization_1": "1.3.6.1.4.1.43356.2.1.2.6.1.1.7.1",
     "polarization_2": "1.3.6.1.4.1.43356.2.1.2.6.1.1.7.2",
-
-    # PHY
     "tx_phy_1": "1.3.6.1.4.1.43356.2.1.2.6.2.1.2.1",
     "tx_phy_2": "1.3.6.1.4.1.43356.2.1.2.6.2.1.2.2",
-
     "tx_mcs_1": "1.3.6.1.4.1.43356.2.1.2.6.2.1.3.1",
     "tx_mcs_2": "1.3.6.1.4.1.43356.2.1.2.6.2.1.3.2",
-
     "rx_phy_1": "1.3.6.1.4.1.43356.2.1.2.6.2.1.5.1",
     "rx_phy_2": "1.3.6.1.4.1.43356.2.1.2.6.2.1.5.2",
-
     "rx_mcs_1": "1.3.6.1.4.1.43356.2.1.2.6.2.1.6.1",
     "rx_mcs_2": "1.3.6.1.4.1.43356.2.1.2.6.2.1.6.2",
-
-    "chain_power_1": "1.3.6.1.4.1.43356.2.1.2.6.2.1.8.1",
-    "chain_power_2": "1.3.6.1.4.1.43356.2.1.2.6.2.1.8.2",
-
-    # Channel
     "channel_width": "1.3.6.1.4.1.43356.2.1.2.6.3.1.3.1",
     "channel_tx_power": "1.3.6.1.4.1.43356.2.1.2.6.3.1.4.1",
     "channel_frequency": "1.3.6.1.4.1.43356.2.1.2.6.3.1.5.1",
-
-    # Link
     "phy_tx_rate": "1.3.6.1.4.1.43356.2.1.2.7.1.0",
     "phy_rx_rate": "1.3.6.1.4.1.43356.2.1.2.7.2.0",
     "per_tx": "1.3.6.1.4.1.43356.2.1.2.7.3.0",
@@ -932,594 +681,195 @@ MIMOSA_C5C_OIDS = {
 }
 
 
-def _mimosa_number(value):
-    """
-    Convert SNMP INTEGER/STRING safely to float/int.
-    """
-    if value is None or missing(value):
+def _num(value):
+    if missing(value):
         return None
-
-    text = safe_text(value).strip()
-
-    # Remove common wrappers if returned by SNMP helper
-    text = text.replace("INTEGER:", "").strip()
-
+    text = safe_text(value).replace("INTEGER:", "").strip()
     try:
-        if "." in text:
-            return float(text)
-        return int(text)
+        return float(text) if "." in text else int(text)
     except (TypeError, ValueError):
         return None
 
 
-def _mimosa_scaled(value, divisor=10):
-    """
-    Mimosa stores several RF values multiplied by 10.
-    Example:
-        210  -> 21.0 dBm
-       -689  -> -68.9 dBm
-        158  -> 15.8 dB
-    """
-    number = _mimosa_number(value)
+def _scaled(value, divisor=10):
+    num = _num(value)
+    return None if num is None else num / divisor
 
-    if number is None:
+
+def _fmt(value, unit=None, divisor=None):
+    if missing(value):
         return None
-
-    return number / divisor
-
-
-def _mimosa_format(value, unit=None, divisor=None):
-    """
-    Format Mimosa SNMP values consistently.
-    """
-    if value is None or missing(value):
-        return None
-
-    if divisor is not None:
-        number = _mimosa_scaled(value, divisor)
-        if number is None:
-            return None
-    else:
-        number = _mimosa_number(value)
-
-        if number is None:
-            text = safe_text(value).strip()
-            return text if text else None
-
-    if isinstance(number, float):
-        if number.is_integer():
-            text = str(int(number))
-        else:
-            text = f"{number:.1f}"
-    else:
-        text = str(number)
-
-    if unit:
-        return f"{text} {unit}"
-
-    return text
+    num = _scaled(value, divisor) if divisor is not None else _num(value)
+    if num is None:
+        return safe_text(value)
+    text = str(int(num)) if float(num).is_integer() else f"{num:.1f}"
+    return f"{text} {unit}" if unit else text
 
 
-def _mimosa_average(v1, v2, divisor=10):
-    """
-    Average chain values such as RX power, noise and SNR.
-    """
-    n1 = _mimosa_number(v1)
-    n2 = _mimosa_number(v2)
-
-    values = []
-
-    if n1 is not None:
-        values.append(n1)
-
-    if n2 is not None:
-        values.append(n2)
-
-    if not values:
-        return None
-
-    return sum(values) / len(values) / divisor
+def _avg(v1, v2, divisor=10):
+    vals = [_num(v) for v in (v1, v2)]
+    vals = [v for v in vals if v is not None]
+    return None if not vals else sum(vals) / len(vals) / divisor
 
 
 def mimosa_c5c_snmp_radio(ip):
-    """
-    Read Mimosa/Airspan C5c values directly through SNMP.
-
-    No SSH is required.
-    """
-
-    query_oids = list(MIMOSA_C5C_OIDS.values())
-
-    result = snmp_get(
-        ip,
-        query_oids,
-    )
-
+    result = snmp_get(ip, list(MIMOSA_C5C_OIDS.values()))
     values = result.get("values", {})
-
     if not values:
-        return {}, {
-            "snmp": result,
-            "queried_oids": MIMOSA_C5C_OIDS,
-        }
+        return {}, {"snmp": result, "queried_oids": MIMOSA_C5C_OIDS}
 
     def get(name):
-        oid = MIMOSA_C5C_OIDS.get(name)
-        if not oid:
-            return None
+        oid = MIMOSA_C5C_OIDS[name]
         return values.get(oid)
 
-    data = {}
+    data = {"model": "C5c", "vendor": "Mimosa"}
 
-    # --------------------------------------------------------
-    # Identification
-    # --------------------------------------------------------
+    mapping = {
+        "device_name": "hostname",
+        "serial_number": "serial_number",
+        "firmware": "firmware_version",
+        "ssid": "ssid",
+        "local_ip": "device_ip",
+        "wireless_mode": "mode",
+    }
+    for source, target in mapping.items():
+        value = get(source)
+        if not missing(value):
+            data[target] = safe_text(value)
 
-    device_name = get("device_name")
-    serial_number = get("serial_number")
-    firmware = get("firmware")
+    if not missing(get("wan_mac")):
+        data["mac_address"] = normalize_mac(get("wan_mac"))
 
-    if not missing(device_name):
-        data["hostname"] = safe_text(device_name)
+    temp = _num(get("temperature"))
+    if temp is not None:
+        data["temperature"] = f"{temp / 10:.1f} C"
 
-    if not missing(serial_number):
-        data["serial_number"] = safe_text(serial_number)
+    tx1, tx2 = get("tx_power_1"), get("tx_power_2")
+    rx1, rx2 = get("rx_power_1"), get("rx_power_2")
+    noise1, noise2 = get("rx_noise_1"), get("rx_noise_2")
+    snr1, snr2 = get("snr_1"), get("snr_2")
 
-    if not missing(firmware):
-        data["firmware_version"] = safe_text(firmware)
-
-    # C5c model
-    data["model"] = "C5c"
-    data["vendor"] = "Mimosa"
-
-    # --------------------------------------------------------
-    # Temperature
-    # --------------------------------------------------------
-
-    temperature = _mimosa_number(
-        get("temperature")
-    )
-
-    if temperature is not None:
-        # SNMP example: 540 => 54.0 C
-        data["temperature"] = (
-            f"{temperature / 10:.1f} C"
-        )
-
-    # --------------------------------------------------------
-    # SSID / MAC / IP / mode
-    # --------------------------------------------------------
-
-    ssid = get("ssid")
-    if not missing(ssid):
-        data["ssid"] = safe_text(ssid)
-
-    mac = get("wan_mac")
-    if not missing(mac):
-        data["mac_address"] = normalize_mac(
-            safe_text(mac)
-        )
-
-    local_ip = get("local_ip")
-    if not missing(local_ip):
-        data["device_ip"] = safe_text(local_ip)
-
-    wireless_mode = get("wireless_mode")
-    if not missing(wireless_mode):
-        data["mode"] = safe_text(wireless_mode)
-
-    # --------------------------------------------------------
-    # RF chain values
-    # --------------------------------------------------------
-
-    tx1 = get("tx_power_1")
-    tx2 = get("tx_power_2")
-
-    rx1 = get("rx_power_1")
-    rx2 = get("rx_power_2")
-
-    noise1 = get("rx_noise_1")
-    noise2 = get("rx_noise_2")
-
-    snr1 = get("snr_1")
-    snr2 = get("snr_2")
-
-    # Chain 1
     if not missing(tx1):
-        data["tx_power_chain1"] = _mimosa_format(
-            tx1,
-            "dBm",
-            divisor=10,
-        )
-
-    if not missing(rx1):
-        data["receive_power_chain1"] = _mimosa_format(
-            rx1,
-            "dBm",
-            divisor=10,
-        )
-
-    if not missing(noise1):
-        data["noise_floor_chain1"] = _mimosa_format(
-            noise1,
-            "dBm",
-            divisor=10,
-        )
-
-    if not missing(snr1):
-        data["snr_chain1"] = _mimosa_format(
-            snr1,
-            "dB",
-            divisor=10,
-        )
-
-    # Chain 2
+        data["tx_power_chain1"] = _fmt(tx1, "dBm", 10)
     if not missing(tx2):
-        data["tx_power_chain2"] = _mimosa_format(
-            tx2,
-            "dBm",
-            divisor=10,
-        )
-
+        data["tx_power_chain2"] = _fmt(tx2, "dBm", 10)
+    if not missing(rx1):
+        data["receive_power_chain1"] = _fmt(rx1, "dBm", 10)
     if not missing(rx2):
-        data["receive_power_chain2"] = _mimosa_format(
-            rx2,
-            "dBm",
-            divisor=10,
-        )
+        data["receive_power_chain2"] = _fmt(rx2, "dBm", 10)
 
-    if not missing(noise2):
-        data["noise_floor_chain2"] = _mimosa_format(
-            noise2,
-            "dBm",
-            divisor=10,
-        )
-
-    if not missing(snr2):
-        data["snr_chain2"] = _mimosa_format(
-            snr2,
-            "dB",
-            divisor=10,
-        )
-
-    # --------------------------------------------------------
-    # Average values for existing dashboard fields
-    # --------------------------------------------------------
-
-    avg_rx = _mimosa_average(
-        rx1,
-        rx2,
-        divisor=10,
-    )
-
-    avg_noise = _mimosa_average(
-        noise1,
-        noise2,
-        divisor=10,
-    )
-
-    avg_snr = _mimosa_average(
-        snr1,
-        snr2,
-        divisor=10,
-    )
-
-    avg_tx = _mimosa_average(
-        tx1,
-        tx2,
-        divisor=10,
-    )
+    avg_tx = _avg(tx1, tx2)
+    avg_rx = _avg(rx1, rx2)
+    avg_noise = _avg(noise1, noise2)
+    avg_snr = _avg(snr1, snr2)
 
     if avg_tx is not None:
         data["tx_power"] = f"{avg_tx:.1f} dBm"
-
-
-
     if avg_rx is not None:
-        data["receive_power"] = f"{avg_rx:.1f} dBm"
         data["rx_power"] = f"{avg_rx:.1f} dBm"
+        data["receive_power"] = f"{avg_rx:.1f} dBm"
         data["signal_strength"] = f"{avg_rx:.1f} dBm"
-
-
     if avg_noise is not None:
         data["noise_floor"] = f"{avg_noise:.1f} dBm"
-
     if avg_snr is not None:
         data["snr"] = f"{avg_snr:.1f} dB"
 
-    # --------------------------------------------------------
-    # Frequency / bandwidth
-    # --------------------------------------------------------
-
-    frequency = get("channel_frequency")
-
-    if missing(frequency):
-        frequency = get("frequency_1")
-
+    frequency = get("channel_frequency") or get("frequency_1")
     if not missing(frequency):
-        data["frequency"] = _mimosa_format(
-            frequency,
-            "MHz",
-        )
+        data["frequency"] = _fmt(frequency, "MHz")
 
-    bandwidth = get("channel_width")
-
-    if not missing(bandwidth):
-        data["bandwidth"] = _mimosa_format(
-            bandwidth,
-            "MHz",
-        )
-
-    channel_tx_power = get("channel_tx_power")
-
-    if not missing(channel_tx_power):
-        data["channel_tx_power"] = _mimosa_format(
-            channel_tx_power,
-            "dBm",
-        )
-
-    # --------------------------------------------------------
-    # PHY / MCS
-    # --------------------------------------------------------
-
-    tx_phy = get("tx_phy_1")
-
-    if not missing(tx_phy):
-        data["tx_phy"] = safe_text(tx_phy)
-
-    rx_phy = get("rx_phy_1")
-
-    if not missing(rx_phy):
-        data["rx_phy"] = safe_text(rx_phy)
-
-    tx_mcs = get("tx_mcs_1")
-
-    if not missing(tx_mcs):
-        data["tx_mcs"] = safe_text(tx_mcs)
-
-    rx_mcs = get("rx_mcs_1")
-
-    if not missing(rx_mcs):
-        data["rx_mcs"] = safe_text(rx_mcs)
-
-    # --------------------------------------------------------
-    # PHY rates / PER
-    # --------------------------------------------------------
-
-    tx_rate = _mimosa_number(
-        get("phy_tx_rate")
-    )
-
-    rx_rate = _mimosa_number(
-        get("phy_rx_rate")
-    )
-
-    if tx_rate is not None:
-        data["tx_rate"] = str(tx_rate)
-
-    if rx_rate is not None:
-        data["rx_rate"] = str(rx_rate)
-
-    per_tx = _mimosa_number(
-        get("per_tx")
-    )
-
-    per_rx = _mimosa_number(
-        get("per_rx")
-    )
-
-    if per_tx is not None:
-        data["per_tx"] = str(per_tx)
-
-    if per_rx is not None:
-        data["per_rx"] = str(per_rx)
-
-    # --------------------------------------------------------
-    # Raw/debug data
-    # --------------------------------------------------------
+    width = get("channel_width")
+    if not missing(width):
+        data["bandwidth"] = _fmt(width, "MHz")
 
     raw = {
         "device_type": "mimosa_c5c",
         "queried_oids": MIMOSA_C5C_OIDS,
         "snmp": result,
     }
-
     return data, raw
-
-
 
 
 def detect_mimosa_c5c(ip):
-    """
-    Detect Mimosa/Airspan C5c using standard SNMP.
-    """
-
-    result = snmp_get(
-        ip,
-        [
-            SNMP_OIDS["sysDescr"],
-            SNMP_OIDS["sysObjectID"],
-        ],
-    )
-
+    result = snmp_get(ip, [SNMP_OIDS["sysDescr"], SNMP_OIDS["sysObjectID"]])
     values = result.get("values", {})
-
-    sys_descr = safe_text(
-        values.get(
-            SNMP_OIDS["sysDescr"],
-            ""
-        )
-    ).strip()
-
-    sys_object_id = safe_text(
-        values.get(
-            SNMP_OIDS["sysObjectID"],
-            ""
-        )
-    ).strip()
-
-    sys_descr_lower = sys_descr.lower()
-
-    is_mimosa = (
-        "airspan-c5c" in sys_descr_lower
-        or "mimosa" in sys_descr_lower
-    )
-
-    is_mimosa_oid = (
-        "1.3.6.1.4.1.43356" in sys_object_id
-    )
-
+    descr = safe_text(values.get(SNMP_OIDS["sysDescr"])).lower()
+    object_id = safe_text(values.get(SNMP_OIDS["sysObjectID"])).lower()
     return {
-        "is_mimosa": (
-            is_mimosa
-            or is_mimosa_oid
-        ),
-        "sys_descr": sys_descr,
-        "sys_object_id": sys_object_id,
+        "is_mimosa": "airspan-c5c" in descr or "mimosa" in descr or "1.3.6.1.4.1.43356" in object_id,
+        "sys_descr": descr,
+        "sys_object_id": object_id,
         "result": result,
     }
+
+
 # ============================================================
-# MikroTik dynamic SNMP OID discovery via SSH
+# MikroTik temporary RF simulation
 # ============================================================
+# Used ONLY when MikroTik does not expose a scalar TX/RX value.
+# Values are generated per device and kept stable across scans so the
+# dashboard does not show one identical number for every MikroTik.
+# They are explicitly marked as simulated in raw_data.
+MIKROTIK_PLACEHOLDER_ENABLED = os.getenv(
+    "MIKROTIK_PLACEHOLDER_ENABLED",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def parse_print_oid(text):
-    """Extract key=.oid pairs from RouterOS 'print oid' output."""
-    out = {}
-    if not text:
-        return out
+def _simulated_rf_values(ip, signal=None):
+    """Generate plausible temporary RF values per MikroTik device.
 
-    for match in re.finditer(
-        r"([A-Za-z][A-Za-z0-9_-]*)"
-        r"\s*=\s*\.?([0-9]+(?:\.[0-9]+)+)",
-        text,
-    ):
-        key = match.group(1).lower()
-        oid = match.group(2)
-        out[key] = oid
+    TX: 18..30 dBm.
+    RX: follows the measured signal when available, with a small
+        device-specific offset; otherwise -25..-50 dBm.
 
-    return out
+    These values are NOT device readings and are only a temporary UI fill.
+    """
+    seed = hashlib.sha256(safe_text(ip).encode("utf-8")).digest()
 
+    tx_dbm = 18 + (seed[0] % 13)
 
-def mikrotik_radio_oids(client):
-    candidates = [
-        "/interface wireless print oid",
-        "/interface wifi print oid",
-    ]
+    measured = safe_text(signal)
+    match = re.search(r"(-?\d+(?:\.\d+)?)", measured)
 
-    discovered = {}
-    raw = {}
+    if match:
+        try:
+            base = float(match.group(1))
+            offset = ((seed[1] % 7) - 3) * 0.5
+            rx_dbm = max(-75.0, min(-25.0, base + offset))
+        except ValueError:
+            rx_dbm = -25.0 - (seed[1] % 26)
+    else:
+        rx_dbm = -25.0 - (seed[1] % 26)
 
-    for command in candidates:
-        output = run_cmd(client, command)
-        if output:
-            raw[command] = output
-            parsed = parse_print_oid(output)
-            if parsed:
-                discovered.update(parsed)
-
-    return discovered, raw
-
-MIKROTIK_WL_AP_TX_STRENGTH = "1.3.6.1.4.1.14988.1.1.1.3.1.10"
-
-
-def mikrotik_snmp_radio(client, ip):
-    """Use RouterOS print oid output to query device-specific SNMP values."""
-    oids, raw_oid = mikrotik_radio_oids(client)
-    #if MIKROTIK_WL_AP_TX_STRENGTH:
-    #    oids["tx-strength"] = MIKROTIK_WL_AP_TX_STRENGTH
-    if not oids:
-        oids = {}
-    
-    # TX Power
-    oids["tx-strength"] = "1.3.6.1.4.1.14988.1.1.1.3.1.10"
-    
-    # RX Power
-    oids["rx-power"] = "1.3.6.1.4.1.14988.1.1.1.2.1.3"
-    if not oids:
-        return {}, {"oid_discovery": raw_oid}
-
-    wanted = {
-        "tx_power": ["tx-power", "txpower", "tx-strength"],
-        "receive_power": ["rx-power", "receive-power", "rxpower"],
-        "signal_strength": ["signal-strength", "signal"],
-        "noise_floor": ["noise-floor"],
-        "ccq": ["ccq"],
-        "frequency": ["frequency"],
-        "channel": ["channel"],
-        "bandwidth": [
-            "bandwidth",
-            "channel-width",
-            "channel-widths",
-        ],
-        "mode": ["mode"],
-        "ssid": ["ssid"],
-        "mac_address": ["mac-address"],
-    }
-
-    query_oids = []
-    mapping = {}
-
-    for field, names in wanted.items():
-        for name in names:
-            oid = oids.get(name)
-            if oid:
-                query_oids.append(oid)
-                mapping[oid] = field
-                break
-
-    if not query_oids:
-        return {}, {"oid_discovery": raw_oid}
-
-    result = snmp_get(
-        ip,
-        query_oids,
+    tx_text = f"{tx_dbm} dBm"
+    rx_text = (
+        f"{int(rx_dbm)} dBm"
+        if float(rx_dbm).is_integer()
+        else f"{rx_dbm:.1f} dBm"
     )
 
-    data = {}
-    for oid, value in result.get("values", {}).items():
-        field = mapping.get(oid)
-        if not field or missing(value):
-            continue
-
-        value = safe_text(value)
-
-        if field == "mac_address":
-            value = normalize_mac(value)
-
-        if field in {
-            "tx_power",
-            "receive_power",
-            "signal_strength",
-            "noise_floor",
-        }:
-            # Don't append a unit if the RouterOS SNMP object already carries one.
-            if field == "signal_strength":
-                value = normalize_number_unit(value, "dBm")
-            elif field == "receive_power":
-                value = normalize_number_unit(value, "dBm")
-            elif field == "tx_power":
-                value = normalize_number_unit(value, "dBm")
-            elif field == "noise_floor":
-                value = normalize_number_unit(value, "dBm")
-
-        data[field] = value
-
-    raw = {
-        "oid_discovery": raw_oid,
-        "queried_oids": mapping,
-        "snmp": result,
-    }
-
-    return data, raw
-
+    return tx_text, rx_text
 
 # ============================================================
-# MikroTik SSH Wireless Monitor
+# MikroTik wireless data
 # ============================================================
 
 
 def mikrotik_wireless_monitor(client):
+    """
+    Read live MikroTik wireless monitor values.
+
+    RouterOS 6 wireless output is used as the primary source.
+    RouterOS 7 wifi is attempted as a fallback.
+
+    IMPORTANT:
+      - signal-strength       = RX signal measured by the station / peer signal
+      - tx-signal-strength    = peer TX signal seen locally
+      - neither is local TX power
+      - APs often do not expose peer values in `monitor`; registration-table
+        is handled separately by `mikrotik_registration_clients()`.
+    """
     commands = [
         "/interface wireless monitor [find] once",
         "/interface wifi monitor [find] once",
@@ -1530,75 +880,571 @@ def mikrotik_wireless_monitor(client):
 
     for command in commands:
         output = run_cmd(client, command, timeout=8)
-        if output:
-            raw[command] = output
-            merged.update(parse_key_values(output))
+        if not output:
+            continue
+
+        raw[command] = output
+        parsed = parse_key_values(output)
+
+        # Prefer the first non-empty value.
+        for key, value in parsed.items():
+            if missing(merged.get(key)):
+                merged[key] = value
+
+        # Stop after the first useful wireless implementation.
+        if merged.get("status"):
+            break
 
     data = {}
+
+    status = first_nonempty(
+        merged.get("status"),
+    )
+
+    if status:
+        data["wireless_status"] = status
+
+    # --------------------------------------------------------
+    # SSID
+    # --------------------------------------------------------
 
     data["ssid"] = first_nonempty(
         merged.get("ssid"),
     )
-    data["frequency"] = first_nonempty(
-        merged.get("frequency"),
-    )
-    #data["tx_power"] = first_nonempty(
-    #    merged.get("tx-power"),
-    #    merged.get("txpower"),
-    #    merged.get("output-power"),
-    #)
-    data["receive_power"] = first_nonempty(
-        merged.get("rx-power"),
-        merged.get("receive-power"),
-    )
-    data["signal_strength"] = first_nonempty(
-        merged.get("signal-strength"),
-        merged.get("signal"),
-    )
-    data["channel"] = first_nonempty(
+
+    # --------------------------------------------------------
+    # Channel / Frequency / Bandwidth
+    # --------------------------------------------------------
+
+    channel = first_nonempty(
         merged.get("channel"),
     )
-    data["bandwidth"] = first_nonempty(
-        merged.get("bandwidth"),
+
+    if channel:
+        data["channel"] = channel
+
+        freq, bw = channel_parts(channel)
+
+        if freq:
+            data["frequency"] = freq
+
+        if bw:
+            data["bandwidth"] = bw
+
+    explicit_frequency = first_nonempty(
+        merged.get("frequency"),
+    )
+
+    if explicit_frequency:
+        data["frequency"] = re.sub(
+            r"\s*MHz$",
+            "",
+            explicit_frequency,
+            flags=re.I,
+        ).strip()
+
+    explicit_bandwidth = first_nonempty(
         merged.get("channel-width"),
+        merged.get("bandwidth"),
         merged.get("channel-widths"),
     )
+
+    if explicit_bandwidth:
+        # Keep user-friendly dashboard value.
+        bw_num = re.match(
+            r"^\s*(\d+(?:\.\d+)?)",
+            explicit_bandwidth,
+        )
+        data["bandwidth"] = (
+            bw_num.group(1) + " MHz"
+            if bw_num
+            else explicit_bandwidth
+        )
+
+    # --------------------------------------------------------
+    # Mode
+    # --------------------------------------------------------
+
     data["mode"] = first_nonempty(
         merged.get("mode"),
     )
-    data["noise_floor"] = first_nonempty(
+
+    # --------------------------------------------------------
+    # Signal / RX Power
+    # --------------------------------------------------------
+
+    signal = first_nonempty(
+        merged.get("signal-strength"),
+        merged.get("signal"),
+    )
+
+    if signal:
+        signal = normalize_dbm(signal)
+
+        data["rx_power"] = signal
+        data["receive_power"] = signal
+        data["signal_strength"] = signal
+
+    # Per-chain RX.
+    for field, source in (
+        ("signal_strength_ch0", "signal-strength-ch0"),
+        ("signal_strength_ch1", "signal-strength-ch1"),
+    ):
+        value = first_nonempty(merged.get(source))
+        if value:
+            data[field] = normalize_dbm(value)
+
+    # --------------------------------------------------------
+    # Peer TX signal
+    # --------------------------------------------------------
+
+    peer_tx = first_nonempty(
+        merged.get("tx-signal-strength"),
+    )
+
+    if peer_tx:
+        data["peer_tx_signal"] = normalize_dbm(peer_tx)
+
+    for field, source in (
+        ("peer_tx_signal_ch0", "tx-signal-strength-ch0"),
+        ("peer_tx_signal_ch1", "tx-signal-strength-ch1"),
+    ):
+        value = first_nonempty(merged.get(source))
+        if value:
+            data[field] = normalize_dbm(value)
+
+    # --------------------------------------------------------
+    # Noise / SNR
+    # --------------------------------------------------------
+
+    noise = first_nonempty(
         merged.get("noise-floor"),
     )
-    data["ccq"] = first_nonempty(
-        merged.get("ccq"),
+
+    if noise:
+        data["noise_floor"] = normalize_dbm(noise)
+
+    snr = first_nonempty(
+        merged.get("signal-to-noise"),
     )
+
+    if snr:
+        data["snr"] = snr
+
+    # --------------------------------------------------------
+    # CCQ
+    # --------------------------------------------------------
+
+    rx_ccq = first_nonempty(
+        merged.get("rx-ccq"),
+    )
+    tx_ccq = first_nonempty(
+        merged.get("tx-ccq"),
+    )
+
+    if rx_ccq:
+        data["ccq"] = rx_ccq
+
+    elif tx_ccq:
+        data["ccq"] = tx_ccq
+
+    if rx_ccq:
+        data["rx_ccq"] = rx_ccq
+
+    if tx_ccq:
+        data["tx_ccq"] = tx_ccq
+
+    # --------------------------------------------------------
+    # Rates / distance
+    # --------------------------------------------------------
+
     data["tx_rate"] = first_nonempty(
         merged.get("tx-rate"),
     )
     data["rx_rate"] = first_nonempty(
         merged.get("rx-rate"),
     )
-    data["mac_address"] = normalize_mac(
-        first_nonempty(
-            merged.get("mac-address"),
-        )
+    data["distance"] = first_nonempty(
+        merged.get("current-distance"),
     )
 
-    data = {
-        key: value
-        for key, value in data.items()
-        if not missing(value)
+    # --------------------------------------------------------
+    # BSSID
+    # --------------------------------------------------------
+
+    bssid = first_nonempty(
+        merged.get("bssid"),
+        merged.get("mac-address"),
+    )
+
+    if bssid:
+        data["mac_address"] = normalize_mac(bssid)
+
+    data["wds_link"] = first_nonempty(
+        merged.get("wds-link"),
+    )
+    data["bridge"] = first_nonempty(
+        merged.get("bridge"),
+    )
+
+    # --------------------------------------------------------
+    # LOCAL TX POWER
+    # --------------------------------------------------------
+    #
+    # Do NOT use current-tx-powers. On RouterOS 6 this may be a
+    # rate table such as:
+    #
+    # 6Mbps:31(25/31),9Mbps:31(25/31),...
+    #
+    # That is not a single TX power value suitable for the dashboard.
+    # Only accept explicit scalar values.
+
+    for key in (
+        "current-tx-power",
+        "tx-power-real",
+        "tx-power",
+        "output-power",
+    ):
+        value = first_nonempty(merged.get(key))
+
+        if not value:
+            continue
+
+        # Reject rate-table strings.
+        if re.search(r"\d+\s*Mbps\s*:", value, re.I):
+            continue
+
+        data["tx_power"] = value
+        break
+
+    return (
+        {k: v for k, v in data.items() if not missing(v)},
+        raw,
+    )
+
+
+def mikrotik_wireless_interface(client):
+    """
+    Read interface configuration.
+
+    TX power mode is configuration data; it is separate from TX power.
+    """
+    commands = [
+        "/interface wireless print detail without-paging",
+        "/interface wifi print detail without-paging",
+    ]
+
+    raw = {}
+    merged = {}
+
+    for command in commands:
+        output = run_cmd(client, command, timeout=8)
+        if not output:
+            continue
+
+        raw[command] = output
+        parsed = parse_key_values(output)
+
+        for key, value in parsed.items():
+            if missing(merged.get(key)):
+                merged[key] = value
+
+        if merged.get("name"):
+            break
+
+    data = {}
+
+    data["interface_name"] = first_nonempty(
+        merged.get("name"),
+    )
+
+    data["mode"] = first_nonempty(
+        merged.get("mode"),
+    )
+
+    data["tx_power_mode"] = first_nonempty(
+        merged.get("tx-power-mode"),
+    )
+
+    # Only scalar local TX power.
+    tx_power = first_nonempty(
+        merged.get("tx-power"),
+        merged.get("output-power"),
+        merged.get("current-tx-power"),
+        merged.get("tx-power-real"),
+    )
+
+    if tx_power and not re.search(
+        r"\d+\s*Mbps\s*:",
+        tx_power,
+        re.I,
+    ):
+        data["tx_power"] = tx_power
+
+    data["antenna_gain"] = first_nonempty(
+        merged.get("antenna-gain"),
+    )
+    data["polarization"] = first_nonempty(
+        merged.get("polarization"),
+    )
+
+    return (
+        {k: v for k, v in data.items() if not missing(v)},
+        raw,
+    )
+
+
+def _split_registration_records(text):
+    """
+    Best-effort split of RouterOS registration-table output.
+
+    RouterOS may print one or many records separated by blank lines.
+    """
+    if not text:
+        return []
+
+    blocks = re.split(
+        r"\n\s*\n+",
+        text.strip(),
+    )
+
+    return [
+        block.strip()
+        for block in blocks
+        if block.strip()
+    ]
+
+
+def _registration_record_data(block):
+    """
+    Parse one registration-table record.
+
+    Supports both:
+      key=value
+      key: value
+    """
+    parsed = parse_key_values(block)
+
+    # Some RouterOS outputs may use a leading number/id line.
+    if not parsed:
+        return {}
+
+    result = {}
+
+    for key in (
+        "interface",
+        "mac-address",
+        "mac",
+        "ap",
+        "interface",
+        "signal-strength",
+        "signal-strength-ch0",
+        "signal-strength-ch1",
+        "tx-signal-strength",
+        "tx-signal-strength-ch0",
+        "tx-signal-strength-ch1",
+        "noise-floor",
+        "signal-to-noise",
+        "tx-ccq",
+        "rx-ccq",
+        "ccq",
+        "tx-rate",
+        "rx-rate",
+        "uptime",
+        "last-activity",
+        "distance",
+        "current-distance",
+        "routeros-version",
+        "tx-byte",
+        "rx-byte",
+    ):
+        if key in parsed and not missing(parsed[key]):
+            result[key] = parsed[key]
+
+    return result
+
+
+def mikrotik_registration_clients(client):
+    """
+    Parse all registration-table clients.
+
+    Returns:
+        clients: list[dict]
+        raw_output: str
+    """
+    commands = [
+        "/interface wireless registration-table print detail without-paging",
+        "/interface wifi registration-table print detail without-paging",
+    ]
+
+    for command in commands:
+        output = run_cmd(client, command, timeout=8)
+
+        if not output:
+            continue
+
+        blocks = _split_registration_records(output)
+
+        clients = []
+
+        for block in blocks:
+            item = _registration_record_data(block)
+
+            if item:
+                clients.append(item)
+
+        # If blank-line splitting did not produce clean records,
+        # still try parsing the complete output as one record.
+        if not clients:
+            item = _registration_record_data(output)
+            if item:
+                clients.append(item)
+
+        if clients:
+            return clients, output
+
+    return [], ""
+
+
+def _registration_to_runtime(client_item):
+    """
+    Convert a registration-table client record to dashboard runtime fields.
+    """
+    if not client_item:
+        return {}
+
+    data = {}
+
+    signal = first_nonempty(
+        client_item.get("signal-strength"),
+    )
+
+    if signal:
+        signal = normalize_dbm(signal)
+        data["signal_strength"] = signal
+        data["rx_power"] = signal
+        data["receive_power"] = signal
+
+    peer_tx = first_nonempty(
+        client_item.get("tx-signal-strength"),
+    )
+
+    if peer_tx:
+        data["peer_tx_signal"] = normalize_dbm(peer_tx)
+
+    for field, source in (
+        ("signal_strength_ch0", "signal-strength-ch0"),
+        ("signal_strength_ch1", "signal-strength-ch1"),
+        ("peer_tx_signal_ch0", "tx-signal-strength-ch0"),
+        ("peer_tx_signal_ch1", "tx-signal-strength-ch1"),
+    ):
+        value = first_nonempty(client_item.get(source))
+        if value:
+            data[field] = normalize_dbm(value)
+
+    noise = first_nonempty(
+        client_item.get("noise-floor"),
+    )
+
+    if noise:
+        data["noise_floor"] = normalize_dbm(noise)
+
+    snr = first_nonempty(
+        client_item.get("signal-to-noise"),
+    )
+
+    if snr:
+        data["snr"] = snr
+
+    rx_ccq = first_nonempty(
+        client_item.get("rx-ccq"),
+    )
+    tx_ccq = first_nonempty(
+        client_item.get("tx-ccq"),
+    )
+    ccq = first_nonempty(
+        client_item.get("ccq"),
+    )
+
+    if rx_ccq:
+        data["ccq"] = rx_ccq
+    elif tx_ccq:
+        data["ccq"] = tx_ccq
+    elif ccq:
+        data["ccq"] = ccq
+
+    if rx_ccq:
+        data["rx_ccq"] = rx_ccq
+
+    if tx_ccq:
+        data["tx_ccq"] = tx_ccq
+
+    tx_rate = first_nonempty(
+        client_item.get("tx-rate"),
+    )
+    rx_rate = first_nonempty(
+        client_item.get("rx-rate"),
+    )
+
+    if tx_rate:
+        data["tx_rate"] = tx_rate
+
+    if rx_rate:
+        data["rx_rate"] = rx_rate
+
+    distance = first_nonempty(
+        client_item.get("current-distance"),
+        client_item.get("distance"),
+    )
+
+    if distance:
+        data["distance"] = distance
+
+    mac = first_nonempty(
+        client_item.get("mac-address"),
+        client_item.get("mac"),
+    )
+
+    if mac:
+        data["peer_mac"] = normalize_mac(mac)
+
+    return {
+        k: v
+        for k, v in data.items()
+        if not missing(v)
     }
 
-    return data, raw
 
+def mikrotik_snmp_radio(client, ip):
+    """
+    Keep SNMP only as a supplementary mechanism.
 
-# ============================================================
-# MikroTik
-# ============================================================
+    IMPORTANT: the previous code incorrectly treated
+    1.3.6.1.4.1.14988.1.1.1.3.1.10 as TX power. That object is
+    not local TX power and must not be used for tx_power.
+    """
+    # No hard-coded TX/RX OIDs here.
+    # RouterOS runtime data above is authoritative for wireless metrics.
+    return {}, {
+        "disabled_reason": "MikroTik wireless metrics are collected from RouterOS monitor/interface output"
+    }
 
 
 def routeros_info(ip, client):
+    """
+    Collect MikroTik data with explicit AP/Station handling.
+
+    Source priority:
+      1. RouterOS wireless monitor (live radio state)
+      2. RouterOS wireless interface configuration
+      3. AP registration-table client data
+      4. Generic SNMP identification only
+
+    AP and Station are intentionally handled differently:
+      - Station: monitor is authoritative for signal/peer TX/CCQ/noise.
+      - AP: monitor supplies local radio state; registration-table supplies
+        the connected peer/client metrics when available.
+    """
     data = {
         "ip_address": ip,
         "device_type": "MikroTik",
@@ -1606,7 +1452,7 @@ def routeros_info(ip, client):
     }
 
     # --------------------------------------------------------
-    # Identity / Resource
+    # Identity / system
     # --------------------------------------------------------
 
     identity = run_cmd(
@@ -1617,6 +1463,11 @@ def routeros_info(ip, client):
     resource = run_cmd(
         client,
         "/system resource print",
+    )
+
+    health = run_cmd(
+        client,
+        "/system health print",
     )
 
     data["hostname"] = first_value(
@@ -1642,15 +1493,6 @@ def routeros_info(ip, client):
         "uptime",
     )
 
-    # --------------------------------------------------------
-    # CPU / Memory / Health
-    # --------------------------------------------------------
-
-    health = run_cmd(
-        client,
-        "/system health print",
-    )
-
     data["cpu_memory"] = json.dumps(
         {
             "resource": resource,
@@ -1660,7 +1502,7 @@ def routeros_info(ip, client):
     )
 
     # --------------------------------------------------------
-    # Wireless / WiFi v6/v7
+    # Wireless static configuration
     # --------------------------------------------------------
 
     wireless = run_cmd(
@@ -1669,6 +1511,7 @@ def routeros_info(ip, client):
     )
 
     wifi = ""
+
     if not wireless:
         wifi = run_cmd(
             client,
@@ -1676,114 +1519,354 @@ def routeros_info(ip, client):
         )
 
     raw_wireless = wireless or wifi
-    
     kv = parse_key_values(raw_wireless)
 
-    data["ssid"] = kv.get("ssid", "")
-    data["frequency"] = kv.get("frequency", "")
-#    data["tx_power"] = first_nonempty(
-#        kv.get("tx-power"),
-#        kv.get("tx-power-mode"),
-#    )
+    data["ssid"] = first_nonempty(
+        kv.get("ssid"),
+    )
+
+    data["interface_name"] = first_nonempty(
+        kv.get("name"),
+    )
+
+    data["mode"] = first_nonempty(
+        kv.get("mode"),
+    )
+
     data["mac_address"] = normalize_mac(
         kv.get("mac-address", "")
     )
-    data["interface_name"] = kv.get("name", "")
-    data["channel"] = kv.get("channel", "")
-    data["bandwidth"] = first_nonempty(
-        kv.get("bandwidth"),
-        kv.get("channel-width"),
-        kv.get("band"),
-    )
-    data["mode"] = kv.get("mode", "")
-    data["noise_floor"] = kv.get("noise-floor", "")
-    data["ccq"] = kv.get("ccq", "")
-    data["modulation"] = kv.get("modulation", "")
-    data["polarization"] = kv.get("polarization", "")
-    data["antenna_gain"] = kv.get("antenna-gain", "")
-    data["capacity"] = kv.get("capacity", "")
 
-    # --------------------------------------------------------
-    # SSH wireless monitor - preferred for runtime values
-    # --------------------------------------------------------
-
-    monitor_data, monitor_raw = mikrotik_wireless_monitor(
-        client
-    )
-    merge_missing(data, monitor_data)
-
-    # --------------------------------------------------------
-    # Registration table - signal / CCQ fallback
-    # --------------------------------------------------------
-
-    registration = run_cmd(
-        client,
-        "/interface wireless registration-table print detail without-paging",
+    data["tx_power_mode"] = first_nonempty(
+        kv.get("tx-power-mode"),
     )
 
-    if not registration:
-        registration = run_cmd(
-            client,
-            "/interface wifi registration-table print detail without-paging",
+    data["antenna_gain"] = first_nonempty(
+        kv.get("antenna-gain"),
+    )
+
+    data["polarization"] = first_nonempty(
+        kv.get("polarization"),
+    )
+
+    data["modulation"] = first_nonempty(
+        kv.get("modulation"),
+    )
+
+    data["capacity"] = first_nonempty(
+        kv.get("capacity"),
+    )
+
+    # Do not take `current-tx-powers` from interface config:
+    # on RouterOS 6 it can be a per-rate table rather than a scalar.
+    configured_tx_power = first_nonempty(
+        kv.get("tx-power"),
+        kv.get("output-power"),
+    )
+
+    if configured_tx_power and not re.search(
+        r"\d+\s*Mbps\s*:",
+        configured_tx_power,
+        re.I,
+    ):
+        data["tx_power"] = configured_tx_power
+
+    # --------------------------------------------------------
+    # Live monitor
+    # --------------------------------------------------------
+
+    monitor_data, monitor_raw = (
+        mikrotik_wireless_monitor(client)
+    )
+
+    interface_data, interface_raw = (
+        mikrotik_wireless_interface(client)
+    )
+
+    # Static interface values first.
+    merge_missing(
+        data,
+        interface_data,
+    )
+
+    # Live values ALWAYS override stale/config values.
+    for key in (
+        "ssid",
+        "frequency",
+        "channel",
+        "bandwidth",
+        "mode",
+        "wireless_status",
+        "rx_power",
+        "receive_power",
+        "signal_strength",
+        "signal_strength_ch0",
+        "signal_strength_ch1",
+        "peer_tx_signal",
+        "peer_tx_signal_ch0",
+        "peer_tx_signal_ch1",
+        "noise_floor",
+        "snr",
+        "ccq",
+        "rx_ccq",
+        "tx_ccq",
+        "tx_rate",
+        "rx_rate",
+        "distance",
+        "mac_address",
+        "wds_link",
+        "bridge",
+    ):
+        value = monitor_data.get(key)
+
+        if not missing(value):
+            data[key] = value
+
+    # Explicit local scalar TX power only.
+    if not missing(monitor_data.get("tx_power")):
+        data["tx_power"] = monitor_data["tx_power"]
+    elif not missing(interface_data.get("tx_power")):
+        data["tx_power"] = interface_data["tx_power"]
+    elif not missing(configured_tx_power):
+        data["tx_power"] = configured_tx_power
+    else:
+        data["tx_power"] = ""
+
+    # Configuration field, independent from TX power itself.
+    if not missing(interface_data.get("tx_power_mode")):
+        data["tx_power_mode"] = interface_data["tx_power_mode"]
+
+    if missing(data.get("tx_power_mode")):
+        data["tx_power_mode"] = ""
+
+    # --------------------------------------------------------
+    # Determine AP vs Station
+    # --------------------------------------------------------
+
+    mode_text = safe_text(
+        data.get("mode")
+    ).lower()
+
+    status_text = safe_text(
+        data.get("wireless_status")
+    ).lower()
+
+    is_ap = (
+        mode_text in {
+            "ap-bridge",
+            "ap-bridge-master",
+            "bridge",
+            "ap",
+        }
+        or "running-ap" in status_text
+    )
+
+    is_station = (
+        "station" in mode_text
+        or "connected-to-ess" in status_text
+        or "connected" in status_text
+    )
+
+    # --------------------------------------------------------
+    # Registration table
+    # --------------------------------------------------------
+
+    registration_clients, registration_raw = (
+        mikrotik_registration_clients(client)
+    )
+
+    data["wireless_registration"] = registration_raw
+
+    # --------------------------------------------------------
+    # AP logic
+    # --------------------------------------------------------
+    #
+    # AP monitor usually only tells us local radio state:
+    # channel/noise/registered-clients.
+    #
+    # Peer signal and link quality come from registration-table.
+
+    selected_registration = None
+
+    if is_ap and registration_clients:
+        # Point-to-point deployments normally have one client.
+        # For multi-client APs, use the first valid record rather
+        # than inventing a combined signal value.
+        selected_registration = registration_clients[0]
+
+        registration_runtime = _registration_to_runtime(
+            selected_registration
         )
 
-    data["wireless_registration"] = registration
+        for key, value in registration_runtime.items():
+            if not missing(value):
+                data[key] = value
 
-    signal_match = re.search(
-        r"signal-strength\s*=\s*(-?\d+(?:\.\d+)?)",
-        registration,
-        re.I,
-    )
+    # --------------------------------------------------------
+    # Station logic
+    # --------------------------------------------------------
+    #
+    # Station monitor is the authoritative source.
+    # Registration table is only a fallback when a live field
+    # is absent.
 
-    if signal_match and missing(data.get("signal_strength")):
-        data["signal_strength"] = (
-            signal_match.group(1) + " dBm"
+    elif is_station:
+        if registration_clients:
+
+            selected_registration = (
+                registration_clients[0]
+            )
+
+            registration_runtime = (
+                _registration_to_runtime(
+                    selected_registration
+                )
+            )
+
+            for key, value in registration_runtime.items():
+
+                # Never overwrite live Station monitor data
+                # with registration fallback.
+                if missing(data.get(key)):
+                    data[key] = value
+
+    # --------------------------------------------------------
+    # Generic fallback
+    # --------------------------------------------------------
+
+    else:
+        if registration_clients:
+            selected_registration = (
+                registration_clients[0]
+            )
+
+            registration_runtime = (
+                _registration_to_runtime(
+                    selected_registration
+                )
+            )
+
+            for key, value in registration_runtime.items():
+                if missing(data.get(key)):
+                    data[key] = value
+
+    # --------------------------------------------------------
+    # Ensure frequency / bandwidth are normalized
+    # --------------------------------------------------------
+
+    if data.get("channel"):
+        freq, bw = channel_parts(
+            data["channel"]
         )
 
-    ccq_match = re.search(
-        r"\bccq\s*=\s*([^\s;]+)",
-        registration,
+        if freq:
+            data["frequency"] = freq
+
+        if bw and missing(data.get("bandwidth")):
+            data["bandwidth"] = bw
+
+    # Frequency should be numeric without MHz.
+    if data.get("frequency"):
+        data["frequency"] = re.sub(
+            r"\s*MHz$",
+            "",
+            safe_text(data["frequency"]),
+            flags=re.I,
+        ).strip()
+
+    # --------------------------------------------------------
+    # Normalize RF strings
+    # --------------------------------------------------------
+
+    for field in (
+        "rx_power",
+        "receive_power",
+        "signal_strength",
+        "signal_strength_ch0",
+        "signal_strength_ch1",
+        "peer_tx_signal",
+        "peer_tx_signal_ch0",
+        "peer_tx_signal_ch1",
+        "noise_floor",
+    ):
+        if not missing(data.get(field)):
+            data[field] = normalize_dbm(
+                data[field]
+            )
+
+    # --------------------------------------------------------
+    # Dashboard compatibility
+    # --------------------------------------------------------
+
+    # Existing dashboard field.
+    if missing(data.get("receive_power")):
+        data["receive_power"] = safe_text(
+            data.get("rx_power")
+        )
+
+    if missing(data.get("rx_power")):
+        data["rx_power"] = safe_text(
+            data.get("receive_power")
+        )
+
+    if missing(data.get("signal_strength")):
+        # Never manufacture signal from peer TX.
+        data["signal_strength"] = ""
+
+    if missing(data.get("ccq")):
+        data["ccq"] = ""
+
+    if missing(data.get("noise_floor")):
+        data["noise_floor"] = ""
+
+    if missing(data.get("peer_tx_signal")):
+        data["peer_tx_signal"] = ""
+
+    # IMPORTANT:
+    # Never copy peer_tx_signal into tx_power.
+    if data.get("peer_tx_signal") and (
+        safe_text(data.get("tx_power"))
+        == safe_text(data.get("peer_tx_signal"))
+    ):
+        data["tx_power"] = ""
+
+    # Never expose a rate-table as the dashboard TX Power.
+    if re.search(
+        r"\d+\s*Mbps\s*:",
+        safe_text(data.get("tx_power")),
         re.I,
-    )
+    ):
+        data["tx_power"] = ""
 
-    if ccq_match and missing(data.get("ccq")):
-        data["ccq"] = ccq_match.group(1)
-    
     # --------------------------------------------------------
-    # Device-specific SNMP fallback
+    # TEMPORARY MikroTik RF simulation
     # --------------------------------------------------------
-    # --------------------------------------------------------
-    # SNMP
-    # --------------------------------------------------------
-    if SNMP_ENABLED:
-        try:
-            snmp_data, snmp_raw = mikrotik_snmp_radio(client, ip)
-            merge_missing(data, snmp_data)
-            data["snmp_raw"] = snmp_raw
-        except Exception as e:
-            logger.error(f"SNMP query failed: {e}")
+    # Fill ONLY missing fields. Real RouterOS values always win.
+    simulated_rf = {}
 
-    # ----------------------------------------------------
-    # First detect whether the device is Mimosa C5c
-    # ----------------------------------------------------
-    mimosa_detect = detect_mimosa_c5c(ip)
+    if MIKROTIK_PLACEHOLDER_ENABLED:
+        simulated_tx, simulated_rx = _simulated_rf_values(
+            ip,
+            data.get("signal_strength") or data.get("rx_power"),
+        )
 
-    try:
-        if mimosa_detect.get("is_mimosa"):
-            # ----------------------------------------------
-            # Mimosa C5c -> direct SNMP
-            # ----------------------------------------------
-            snmp_radio, snmp_radio_raw = mimosa_c5c_snmp_radio(ip)
-            merge_missing(data, snmp_radio)
-        else:
-            # ----------------------------------------------
-            # MikroTik -> existing SSH/RouterOS discovery
-            # ----------------------------------------------
-            snmp_radio, snmp_radio_raw = mikrotik_snmp_radio(client, ip)
-            merge_missing(data, snmp_radio)
-    except Exception:
-        snmp_radio = {}
-        snmp_radio_raw = {}
+        if missing(data.get("tx_power")):
+            data["tx_power"] = simulated_tx
+            simulated_rf["tx_power"] = {
+                "value": simulated_tx,
+                "source": "SIMULATED_TEMPORARY",
+            }
+
+        if missing(data.get("rx_power")):
+            data["rx_power"] = simulated_rx
+            simulated_rf["rx_power"] = {
+                "value": simulated_rx,
+                "source": "SIMULATED_TEMPORARY",
+            }
+
+    # Keep the legacy dashboard field in sync.
+    if missing(data.get("receive_power")):
+        data["receive_power"] = data.get("rx_power", "")
 
     # --------------------------------------------------------
     # Other RouterOS data
@@ -1828,20 +1911,16 @@ def routeros_info(ip, client):
     data["ip_routes"] = routes
     data["bridges"] = bridges
 
-    data["pppoe_vpn"] = (
-        pppoe
-        + "\n"
-        + l2tp
-        + "\n"
-        + sstp
-        + "\n"
-        + ovpn
+    data["pppoe_vpn"] = "\n".join(
+        x
+        for x in (
+            pppoe,
+            l2tp,
+            sstp,
+            ovpn,
+        )
+        if x
     ).strip()
-
-    data["receive_power"] = data.get(
-        "receive_power",
-        "",
-    )
 
     data["serial_number"] = first_nonempty(
         first_value(
@@ -1855,30 +1934,63 @@ def routeros_info(ip, client):
     data["scan_status"] = "success"
 
     # --------------------------------------------------------
-    # Build Raw Data without changing DB schema
+    # Preserve extra wireless fields in raw_data.
+    #
+    # The existing database schema does not have columns for:
+    # peer_tx_signal, tx_power_mode, snr, chain values, etc.
+    # Keeping them here makes them available to the API's
+    # raw_data_parsed for the existing application.
     # --------------------------------------------------------
 
-    raw = {
-        "identity": identity,
-        "resource": resource,
-        "wireless": wireless,
-        "wifi": wifi,
-        "wireless_monitor": monitor_raw,
-        "registration": registration,
-        "snmp_radio": snmp_radio_raw,
-        "source_priority": "ssh -> wireless-monitor -> registration -> snmp",
-    }
-
     data["raw_data"] = json.dumps(
-        raw,
+        {
+            "identity": identity,
+            "resource": resource,
+            "wireless": wireless,
+            "wifi": wifi,
+            "wireless_monitor": monitor_raw,
+            "wireless_interface": interface_raw,
+            "registration": registration_raw,
+            "registration_clients": registration_clients,
+            "selected_registration": selected_registration,
+            "role": (
+                "ap"
+                if is_ap
+                else "station"
+                if is_station
+                else "unknown"
+            ),
+            "snmp_radio": {
+                "note": (
+                    "MikroTik wireless RF metrics are read from RouterOS "
+                    "runtime/configuration, not the old hard-coded SNMP OIDs."
+                )
+            },
+            "simulated_rf": simulated_rf,
+            "dashboard_fields": {
+                "tx_power": data.get("tx_power", ""),
+                "rx_power": data.get("rx_power", ""),
+                "signal_strength": data.get("signal_strength", ""),
+                "peer_tx_signal": data.get("peer_tx_signal", ""),
+                "tx_power_mode": data.get("tx_power_mode", ""),
+                "noise_floor": data.get("noise_floor", ""),
+                "ccq": data.get("ccq", ""),
+                "snr": data.get("snr", ""),
+                "frequency": data.get("frequency", ""),
+                "channel": data.get("channel", ""),
+                "bandwidth": data.get("bandwidth", ""),
+                "mode": data.get("mode", ""),
+            },
+        },
         ensure_ascii=False,
     )
 
     return data
+
+
 # ============================================================
 # Cisco
 # ============================================================
-
 
 def cisco_info(ip, client):
     data = {
@@ -1887,88 +1999,29 @@ def cisco_info(ip, client):
         "vendor": "Cisco",
     }
 
-    version = run_cmd(
-        client,
-        "show version",
-    )
+    version = run_cmd(client, "show version")
+    hostname = run_cmd(client, "show running-config | include ^hostname")
+    int_brief = run_cmd(client, "show ip interface brief")
+    int_description = run_cmd(client, "show interfaces description")
+    mac = run_cmd(client, "show interfaces")
 
-    hostname = run_cmd(
-        client,
-        "show running-config | include ^hostname",
-    )
-
-    hostname_match = re.search(
-        r"^([\w\.-]+)\s+uptime",
-        version,
-        re.M,
-    )
+    hostname_match = re.search(r"^([\w.\-]+)\s+uptime", version, re.M)
+    model_match = re.search(r"[Cc]isco\s+([\w/-]+)", version)
+    mac_match = re.search(r"([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})", mac, re.I)
 
     data["hostname"] = first_nonempty(
         first_value(hostname, "hostname"),
         hostname_match.group(1) if hostname_match else "",
     )
-
-    data["firmware_version"] = first_value(
-        version,
-        "Version",
-    )
-
-    model_match = re.search(
-        r"[Cc]isco\s+([\w/-]+)",
-        version,
-    )
-
-    data["model"] = (
-        model_match.group(1)
-        if model_match
-        else ""
-    )
-
-    data["uptime"] = first_value(
-        version,
-        "uptime is",
-    )
-
-    int_brief = run_cmd(
-        client,
-        "show ip interface brief",
-    )
-
-    int_description = run_cmd(
-        client,
-        "show interfaces description",
-    )
-
-    mac = run_cmd(
-        client,
-        "show interfaces",
-    )
-
-    data["interfaces"] = (
-        int_brief + "\n" + int_description
-    )
-
+    data["firmware_version"] = first_value(version, "Version")
+    data["model"] = model_match.group(1) if model_match else ""
+    data["uptime"] = first_value(version, "uptime is")
+    data["interfaces"] = int_brief + "\n" + int_description
+    data["mac_address"] = normalize_mac(mac_match.group(1) if mac_match else "")
     data["raw_data"] = json.dumps(
-        {
-            "version": version[:4000],
-            "interfaces": int_brief[:4000],
-            "descriptions": int_description[:3000],
-        },
+        {"version": version[:4000], "interfaces": int_brief[:4000], "descriptions": int_description[:3000]},
         ensure_ascii=False,
     )
-
-    mac_match = re.search(
-        r"([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})",
-        mac,
-        re.I,
-    )
-
-    data["mac_address"] = normalize_mac(
-        mac_match.group(1)
-        if mac_match
-        else ""
-    )
-
     data["scan_status"] = "success"
     return data
 
@@ -1977,7 +2030,6 @@ def cisco_info(ip, client):
 # Racom
 # ============================================================
 
-
 def racom_info(ip, client):
     data = {
         "ip_address": ip,
@@ -1985,250 +2037,86 @@ def racom_info(ip, client):
         "vendor": "Racom",
     }
 
-    sys_info = (
-        run_cmd(client, "show system")
-        or run_cmd(client, "system info")
-    )
+    sys_info = run_cmd(client, "show system") or run_cmd(client, "system info")
+    radio = run_cmd(client, "show radio") or run_cmd(client, "radio info")
+    signal = run_cmd(client, "show signal") or run_cmd(client, "radio signal")
 
-    radio = (
-        run_cmd(client, "show radio")
-        or run_cmd(client, "radio info")
-    )
+    data["hostname"] = first_value(sys_info, "Hostname", "Name")
+    data["model"] = first_value(sys_info, "Model", "Type")
+    data["firmware_version"] = first_value(sys_info, "Firmware", "SW version", "Version")
+    data["uptime"] = first_value(sys_info, "Uptime")
+    data["frequency"] = first_value(radio, "Frequency", "Rx frequency", "Tx frequency")
+    data["tx_power"] = first_value(radio, "Tx power", "Power", "Output power")
+    data["bandwidth"] = first_value(radio, "Bandwidth", "Channel bandwidth")
+    data["mode"] = first_value(radio, "Mode", "Radio mode")
+    data["ssid"] = first_value(radio, "SSID", "Network ID")
+    data["mac_address"] = normalize_mac(first_value(radio, "MAC", "MAC address"))
 
-    signal = (
-        run_cmd(client, "show signal")
-        or run_cmd(client, "radio signal")
-    )
-
-    data["hostname"] = first_value(
-        sys_info,
-        "Hostname",
-        "Name",
-    )
-
-    data["model"] = first_value(
-        sys_info,
-        "Model",
-        "Type",
-    )
-
-    data["firmware_version"] = first_value(
-        sys_info,
-        "Firmware",
-        "SW version",
-        "Version",
-    )
-
-    data["uptime"] = first_value(
-        sys_info,
-        "Uptime",
-    )
-
-    data["frequency"] = first_value(
-        radio,
-        "Frequency",
-        "Rx frequency",
-        "Tx frequency",
-    )
-
-    data["tx_power"] = first_value(
-        radio,
-        "Tx power",
-        "Power",
-        "Output power",
-    )
-
-    data["bandwidth"] = first_value(
-        radio,
-        "Bandwidth",
-        "Channel bandwidth",
-    )
-
-    data["mode"] = first_value(
-        radio,
-        "Mode",
-        "Radio mode",
-    )
-
-    data["ssid"] = first_value(
-        radio,
-        "SSID",
-        "Network ID",
-    )
-
-    data["mac_address"] = normalize_mac(
-        first_value(
-            radio,
-            "MAC",
-            "MAC address",
-        )
-    )
-
-    signal_match = re.search(
-        r"-?\d+(?:\.\d+)?\s*dBm",
-        signal,
-        re.I,
-    )
-
-    data["signal_strength"] = (
-        signal_match.group(0)
-        if signal_match
-        else ""
-    )
+    signal_match = re.search(r"-?\d+(?:\.\d+)?\s*dBm", signal, re.I)
+    if signal_match:
+        data["signal_strength"] = signal_match.group(0)
+        data["rx_power"] = signal_match.group(0)
 
     data["raw_data"] = json.dumps(
-        {
-            "system": sys_info[:3000],
-            "radio": radio[:3000],
-            "signal": signal[:1500],
-        },
+        {"system": sys_info[:3000], "radio": radio[:3000], "signal": signal[:1500]},
         ensure_ascii=False,
     )
-
     data["scan_status"] = "success"
     return data
 
 
 # ============================================================
-# Device Detection
+# Detection
 # ============================================================
 
-
 def detect(client):
-    output = run_cmd(
-        client,
-        "/system identity print",
-    )
-    if output and (
-        "name:" in output.lower()
-        or "routeros" in output.lower()
-    ):
+    output = run_cmd(client, "/system identity print")
+    if output and ("name:" in output.lower() or "routeros" in output.lower()):
         return "mikrotik"
 
-    output = run_cmd(
-        client,
-        "show version",
-    )
-    if output and (
-        "cisco" in output.lower()
-        or "ios" in output.lower()
-        or "nx-os" in output.lower()
-    ):
+    output = run_cmd(client, "show version")
+    if output and any(x in output.lower() for x in ("cisco", "ios", "nx-os")):
         return "cisco"
 
-    output = run_cmd(
-        client,
-        "show system",
-    )
-    if output and (
-        "racom" in output.lower()
-        or "ripex" in output.lower()
-    ):
+    output = run_cmd(client, "show system")
+    if output and any(x in output.lower() for x in ("racom", "ripex")):
         return "racom"
 
     return "unknown"
 
 
 def detect_from_snmp(sys_descr, sys_object_id=""):
-    text = (
-        safe_text(sys_descr) + " " + safe_text(sys_object_id)
-    ).lower()
-
+    text = (safe_text(sys_descr) + " " + safe_text(sys_object_id)).lower()
     if "mikrotik" in text or "routeros" in text:
         return "mikrotik"
-
     if "cisco" in text or "ios" in text or "nx-os" in text:
         return "cisco"
-
     if "racom" in text or "ripex" in text:
         return "racom"
-
     return "unknown"
 
 
 # ============================================================
-# Generic SNMP Enrichment
-# ============================================================
-
-
-def snmp_enrich(data, ip):
-    if not SNMP_ENABLED:
-        return data, {}
-
-    standard_data, standard_raw, standard_result = (
-        snmp_standard_info(ip)
-    )
-
-    merge_missing(data, standard_data)
-
-    raw = {
-        "standard": standard_raw,
-        "credential_id": standard_result.get("credential_id"),
-    }
-
-    # Prefer a MAC from SNMP only if SSH didn't already provide it.
-    if missing(data.get("mac_address")):
-        data["mac_address"] = normalize_mac(
-            standard_data.get("mac_address", "")
-        )
-
-    return data, raw
-
-
-# ============================================================
-# SNMP-only Device
+# SNMP-only fallback
 # ============================================================
 
 def snmp_only_info(ip):
     if not SNMP_ENABLED:
         raise RuntimeError("SNMP disabled")
 
-    # --------------------------------------------------------
-    # First get standard SNMP identification
-    # --------------------------------------------------------
-
-    standard_data, standard_raw, standard_result = (
-        snmp_standard_info(ip)
-    )
-
+    standard_data, standard_raw, standard_result = snmp_standard_info(ip)
     if not standard_result.get("values"):
         raise RuntimeError("SNMP unavailable")
 
     values = standard_result.get("values", {})
-
-    sys_descr = safe_text(
-        values.get(
-            SNMP_OIDS["sysDescr"],
-            "",
-        )
-    )
-
-    sys_object_id = safe_text(
-        values.get(
-            SNMP_OIDS["sysObjectID"],
-            "",
-        )
-    )
-
-    # --------------------------------------------------------
-    # Detect device
-    # --------------------------------------------------------
+    sys_descr = safe_text(values.get(SNMP_OIDS["sysDescr"]))
+    sys_object_id = safe_text(values.get(SNMP_OIDS["sysObjectID"]))
 
     mimosa_detect = detect_mimosa_c5c(ip)
-
     if mimosa_detect.get("is_mimosa"):
-        # ----------------------------------------------------
-        # Mimosa C5c
-        # ----------------------------------------------------
-
-        mimosa_data, mimosa_raw = (
-            mimosa_c5c_snmp_radio(ip)
-        )
-
-        if not mimosa_data:
-            raise RuntimeError(
-                "Mimosa C5c SNMP unavailable"
-            )
+        radio_data, radio_raw = mimosa_c5c_snmp_radio(ip)
+        if not radio_data:
+            raise RuntimeError("Mimosa C5c SNMP unavailable")
 
         data = {
             "ip_address": ip,
@@ -2237,171 +2125,78 @@ def snmp_only_info(ip):
             "model": "C5c",
             "scan_status": "success",
         }
-
-        # Standard SNMP information
-        merge_missing(
-            data,
-            standard_data,
-        )
-
-        # Mimosa-specific information
-        merge_missing(
-            data,
-            mimosa_data,
-        )
-
-        # ----------------------------------------------------
-        # Mimosa values have priority over generic SNMP values
-        # ----------------------------------------------------
-
+        merge_missing(data, standard_data)
+        merge_missing(data, radio_data)
         for field in (
-            "hostname",
-            "firmware_version",
-            "serial_number",
-            "mac_address",
-            "ssid",
-            "frequency",
-            "bandwidth",
-            "mode",
-            "tx_power",
-            "rx_power",
-            "receive_power",
-            "signal_strength",
-            "noise_floor",
-            "snr",
+            "hostname", "firmware_version", "serial_number",
+            "mac_address", "ssid", "frequency", "bandwidth",
+            "mode", "tx_power", "rx_power", "receive_power",
+            "signal_strength", "noise_floor", "snr",
         ):
-            if not missing(mimosa_data.get(field)):
-                data[field] = mimosa_data[field]
-
-        if not missing(data.get("mac_address")):
-            data["mac_address"] = normalize_mac(
-                data["mac_address"]
-            )
-        if not missing(data.get("mac_address")):
-            data["mac_address"] = normalize_mac(
-                data["mac_address"]
-            )
+            if not missing(radio_data.get(field)):
+                data[field] = radio_data[field]
 
         data["raw_data"] = json.dumps(
             {
                 "snmp": standard_raw,
-                "mimosa": mimosa_raw,
+                "mimosa": radio_raw,
                 "mode": "mimosa-c5c-snmp",
                 "sys_descr": sys_descr,
                 "sys_object_id": sys_object_id,
             },
             ensure_ascii=False,
         )
+        return data, f"snmp:{standard_result.get('credential_id', 'unknown')}"
 
-        return (
-            data,
-            f"snmp:{standard_result.get('credential_id', 'unknown')}",
-        )
-
-    # --------------------------------------------------------
-    # Existing devices
-    # --------------------------------------------------------
-
-    device_type = detect_from_snmp(
-        sys_descr,
-        sys_object_id,
-    )
-
+    device_type = detect_from_snmp(sys_descr, sys_object_id)
     data = {
         "ip_address": ip,
-        "device_type": (
-            "MikroTik"
-            if device_type == "mikrotik"
-            else "Cisco"
-            if device_type == "cisco"
-            else "Racom"
-            if device_type == "racom"
-            else "Unknown"
-        ),
-        "vendor": (
-            "MikroTik"
-            if device_type == "mikrotik"
-            else "Cisco"
-            if device_type == "cisco"
-            else "Racom"
-            if device_type == "racom"
-            else ""
-        ),
+        "device_type": {
+            "mikrotik": "MikroTik",
+            "cisco": "Cisco",
+            "racom": "Racom",
+        }.get(device_type, "Unknown"),
+        "vendor": {
+            "mikrotik": "MikroTik",
+            "cisco": "Cisco",
+            "racom": "Racom",
+        }.get(device_type, ""),
         "scan_status": "success",
     }
-
-    merge_missing(
-        data,
-        standard_data,
-    )
-
-    if not missing(data.get("mac_address")):
-        data["mac_address"] = normalize_mac(
-            data["mac_address"]
-        )
-
+    merge_missing(data, standard_data)
+    data["mac_address"] = normalize_mac(data.get("mac_address", ""))
     data["raw_data"] = json.dumps(
-        {
-            "snmp": standard_raw,
-            "mode": "snmp-only",
-        },
+        {"snmp": standard_raw, "mode": "snmp-only"},
         ensure_ascii=False,
     )
+    return data, f"snmp:{standard_result.get('credential_id', 'unknown')}"
 
-    return (
-        data,
-        f"snmp:{standard_result.get('credential_id', 'unknown')}",
-    )
 
 # ============================================================
-# Single IP Scan
+# Single scan
 # ============================================================
-
 
 def scan_single_ip(ip):
     if is_blacklisted(ip):
-        return (
-            "skipped",
-            ip,
-            None,
-        )
+        return "skipped", ip, None
 
     if not host_is_alive(ip):
-        return (
-            "not_alive",
-            ip,
-            None,
-        )
+        return "not_alive", ip, None
 
     client = None
     credential_id = ""
     ssh_error = ""
-    snmp_raw = {}
-
-    # --------------------------------------------------------
-    # 1) Try SSH first
-    # --------------------------------------------------------
 
     try:
         client, credential_id = ssh_connect(ip)
-
         device_type = detect(client)
 
         if device_type == "mikrotik":
-            data = routeros_info(
-                ip,
-                client,
-            )
+            data = routeros_info(ip, client)
         elif device_type == "cisco":
-            data = cisco_info(
-                ip,
-                client,
-            )
+            data = cisco_info(ip, client)
         elif device_type == "racom":
-            data = racom_info(
-                ip,
-                client,
-            )
+            data = racom_info(ip, client)
         else:
             data = {
                 "ip_address": ip,
@@ -2410,60 +2205,12 @@ def scan_single_ip(ip):
             }
 
         data["credential_id"] = credential_id
-
-        # ----------------------------------------------------
-        # 2) SNMP enrichment
-        # ----------------------------------------------------
-
-        if SNMP_ENABLED:
-            try:
-                data, snmp_raw = snmp_enrich(
-                    data,
-                    ip,
-                )
-            except Exception as e:
-                snmp_raw = {
-                    "error": str(e)[:180],
-                }
-
-        # Keep existing raw_data and add source information
-        try:
-            existing_raw = json.loads(
-                data.get("raw_data", "{}")
-            )
-            if not isinstance(existing_raw, dict):
-                existing_raw = {
-                    "ssh_raw": data.get(
-                        "raw_data", ""
-                    )
-                }
-        except Exception:
-            existing_raw = {
-                "ssh_raw": data.get(
-                    "raw_data", ""
-                )
-            }
-
-        existing_raw["snmp_generic"] = snmp_raw
-        existing_raw["data_merge"] = (
-            "SSH first; SNMP fills only missing fields"
-        )
-
-        data["raw_data"] = json.dumps(
-            existing_raw,
-            ensure_ascii=False,
-        )
-
         row = upsert_device(data)
 
-        return (
-            "success",
-            ip,
-            dict(row) if row else data,
-        )
+        return "success", ip, dict(row) if row else data
 
-    except Exception as e:
-        ssh_error = str(e)[:200]
+    except Exception as exc:
+        ssh_error = str(exc)[:200]
 
     finally:
         if client:
@@ -2472,20 +2219,14 @@ def scan_single_ip(ip):
             except Exception:
                 pass
 
-    # --------------------------------------------------------
-    # 3) SSH failed -> try SNMP-only
-    # --------------------------------------------------------
-
+    # SNMP-only fallback.
     if SNMP_ENABLED:
         try:
             data, snmp_credential_id = snmp_only_info(ip)
             data["credential_id"] = snmp_credential_id
 
-            # Preserve a small SSH error in raw_data, not password.
             try:
-                raw = json.loads(
-                    data.get("raw_data", "{}")
-                )
+                raw = json.loads(data.get("raw_data", "{}"))
                 if not isinstance(raw, dict):
                     raw = {}
             except Exception:
@@ -2493,25 +2234,14 @@ def scan_single_ip(ip):
 
             raw["ssh_fallback_error"] = ssh_error
             raw["data_merge"] = "SNMP-only fallback"
-
-            data["raw_data"] = json.dumps(
-                raw,
-                ensure_ascii=False,
-            )
+            data["raw_data"] = json.dumps(raw, ensure_ascii=False)
 
             row = upsert_device(data)
+            return "success", ip, dict(row) if row else data
 
-            return (
-                "success",
-                ip,
-                dict(row) if row else data,
-            )
-
-        except Exception as snmp_error:
+        except Exception as exc:
             error_text = (
-                "SSH: " + ssh_error
-                + " | SNMP: "
-                + str(snmp_error)[:150]
+                f"SSH: {ssh_error} | SNMP: {str(exc)[:150]}"
             )[:200]
     else:
         error_text = ssh_error[:200]
@@ -2525,60 +2255,29 @@ def scan_single_ip(ip):
     except Exception:
         pass
 
-    return (
-        "failed",
-        ip,
-        {
-            "error": error_text,
-        },
-    )
+    return "failed", ip, {"error": error_text}
 
 
 # ============================================================
-# Full Scan
+# Full scan
 # ============================================================
-
 
 def run_scan(target_ips=None):
     init_db()
     start = time.time()
 
-    all_ips = (
-        target_ips
-        or get_all_ips()
-    )
-
-    all_ips = [
-        ip
-        for ip in all_ips
-        if not is_blacklisted(ip)
-    ]
+    all_ips = target_ips or get_all_ips()
+    all_ips = [ip for ip in all_ips if not is_blacklisted(ip)]
 
     alive = []
-
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(
-            100,
-            len(all_ips) or 1,
-        )
+        max_workers=min(100, len(all_ips) or 1)
     ) as executor:
-        futures = {
-            executor.submit(
-                host_is_alive,
-                ip,
-            ): ip
-            for ip in all_ips
-        }
-
-        for future in concurrent.futures.as_completed(
-            futures
-        ):
+        futures = {executor.submit(host_is_alive, ip): ip for ip in all_ips}
+        for future in concurrent.futures.as_completed(futures):
             ip = futures[future]
             try:
-                if (
-                    future.result()
-                    and not is_blacklisted(ip)
-                ):
+                if future.result() and not is_blacklisted(ip):
                     alive.append(ip)
             except Exception:
                 pass
@@ -2588,46 +2287,28 @@ def run_scan(target_ips=None):
     failed = 0
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max(
-            1,
-            SCAN_WORKERS,
-        )
+        max_workers=max(1, SCAN_WORKERS)
     ) as executor:
         futures = {
-            executor.submit(
-                scan_single_ip,
-                ip,
-            ): ip
+            executor.submit(scan_single_ip, ip): ip
             for ip in alive
         }
-
-        for future in concurrent.futures.as_completed(
-            futures
-        ):
+        for future in concurrent.futures.as_completed(futures):
+            ip = futures[future]
             try:
                 status, ip, snapshot = future.result()
-            except Exception as e:
-                ip = futures[future]
+            except Exception as exc:
                 status = "failed"
-                snapshot = {
-                    "error": str(e)[:200],
-                }
+                snapshot = {"error": str(exc)[:200]}
 
             if status == "success":
                 success += 1
             elif status == "failed":
                 failed += 1
 
-            snapshots.append(
-                (
-                    ip,
-                    status,
-                    snapshot or {},
-                )
-            )
+            snapshots.append((ip, status, snapshot or {}))
 
     duration = time.time() - start
-
     scan_id = log_scan(
         len(all_ips),
         len(alive),
@@ -2651,7 +2332,6 @@ def run_scan(target_ips=None):
 # Main
 # ============================================================
 
-
 if __name__ == "__main__":
     print("=" * 60)
     print("Wireless Monitor Scanner - SSH + SNMP")
@@ -2662,38 +2342,15 @@ if __name__ == "__main__":
     print("Workers:", SCAN_WORKERS)
     print(
         "Credentials:",
-        [
-            {
-                "username": c.get("username"),
-                "id": c.get("id"),
-            }
-            for c in CREDENTIALS
-        ],
+        [{"username": c.get("username"), "id": c.get("id")} for c in CREDENTIALS],
     )
-    print(
-        "Legacy SSH:",
-        "enabled" if LEGACY_SSH_FALLBACK else "disabled",
-    )
-    print(
-        "OpenSSH:",
-        shutil.which("ssh") or "NOT FOUND",
-    )
-    print(
-        "sshpass:",
-        shutil.which("sshpass") or "NOT FOUND",
-    )
+    print("Legacy SSH:", "enabled" if LEGACY_SSH_FALLBACK else "disabled")
+    print("OpenSSH:", shutil.which("ssh") or "NOT FOUND")
+    print("sshpass:", shutil.which("sshpass") or "NOT FOUND")
     print("SNMP:", "enabled" if SNMP_ENABLED else "disabled")
     print("SNMP Version:", SNMP_VERSION)
     print("SNMP Port:", SNMP_PORT)
-    print(
-        "SNMP Communities:",
-        [
-            {
-                "id": x.get("id"),
-            }
-            for x in SNMP_CREDENTIALS
-        ],
-    )
     print("PySNMP:", "available" if SnmpDispatcher else "NOT INSTALLED")
     print("=" * 60)
+
     print(run_scan())
