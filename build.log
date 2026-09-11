@@ -1,279 +1,0 @@
---progress is a global compose flag, better use `docker compose --progress xx build ...
- Image wireless_monitor_full_smk-wireless-monitor Building 
-#1 [internal] load local bake definitions
-#1 reading from stdin 614B done
-#1 DONE 0.0s
-
-#2 [internal] load build definition from Dockerfile
-#2 transferring dockerfile: 477B done
-#2 DONE 0.0s
-
-#3 [internal] load metadata for docker.io/library/python:3.12-slim
-#3 DONE 0.2s
-
-#4 [internal] load .dockerignore
-#4 transferring context: 2B done
-#4 DONE 0.0s
-
-#5 [internal] load build context
-#5 DONE 0.0s
-
-#6 [1/7] FROM docker.io/library/python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
-#6 resolve docker.io/library/python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a 0.2s done
-#6 DONE 0.2s
-
-#7 [2/7] WORKDIR /app
-#7 CACHED
-
-#5 [internal] load build context
-#5 transferring context: 1.75kB done
-#5 DONE 0.1s
-
-#8 [3/7] RUN apt-get update     && apt-get install -y --no-install-recommends         openssh-client         sshpass         iproute2         iputils-ping         cron     && rm -rf /var/lib/apt/lists/*
-#8 1.209 Hit:1 http://deb.debian.org/debian trixie InRelease
-#8 1.223 Get:2 http://deb.debian.org/debian trixie-updates InRelease [47.3 kB]
-#8 1.397 Get:3 http://deb.debian.org/debian-security trixie-security InRelease [43.4 kB]
-#8 1.494 Get:4 http://deb.debian.org/debian trixie/main amd64 Packages [9673 kB]
-#8 5.136 Get:5 http://deb.debian.org/debian trixie-updates/main amd64 Packages [4412 B]
-#8 5.204 Get:6 http://deb.debian.org/debian-security trixie-security/main amd64 Packages [246 kB]
-#8 6.933 Fetched 10.0 MB in 6s (1595 kB/s)
-#8 6.933 Reading package lists...
-#8 8.337 Reading package lists...
-#8 9.792 Building dependency tree...
-#8 10.06 Reading state information...
-#8 10.51 The following additional packages will be installed:
-#8 10.51   cron-daemon-common libapparmor1 libbpf1 libcap2-bin libcbor0.10 libcom-err2
-#8 10.51   libedit2 libelf1t64 libfido2-1 libgssapi-krb5-2 libidn2-0 libk5crypto3
-#8 10.51   libkeyutils1 libkrb5-3 libkrb5support0 libmnl0 libsystemd-shared
-#8 10.51   libtirpc-common libtirpc3t64 libunistring5 libxtables12 sensible-utils
-#8 10.52   systemd
-#8 10.52 Suggested packages:
-#8 10.52   anacron logrotate checksecurity supercat bat python3:any krb5-doc krb5-user
-#8 10.52   libarchive13t64 libcryptsetup12 libdw1t64 libgcrypt20 libip4tc2 libp11-kit0
-#8 10.52   libpwquality1 libqrencode4 libtss2-rc0t64 keychain libpam-ssh monkeysphere
-#8 10.52   ssh-askpass systemd-container systemd-homed systemd-userdbd systemd-boot
-#8 10.52   systemd-resolved systemd-repart libtss2-tcti-device0 polkitd
-#8 10.52 Recommended packages:
-#8 10.52   default-mta | mail-transport-agent linux-sysctl-defaults libpam-cap
-#8 10.52   krb5-locales libkmod2 xauth default-dbus-system-bus | dbus-system-bus
-#8 10.52   systemd-timesyncd | time-daemon systemd-cryptsetup
-#8 10.95 The following NEW packages will be installed:
-#8 10.95   cron cron-daemon-common iproute2 iputils-ping libapparmor1 libbpf1
-#8 10.95   libcap2-bin libcbor0.10 libcom-err2 libedit2 libelf1t64 libfido2-1
-#8 10.95   libgssapi-krb5-2 libidn2-0 libk5crypto3 libkeyutils1 libkrb5-3
-#8 10.95   libkrb5support0 libmnl0 libsystemd-shared libtirpc-common libtirpc3t64
-#8 10.96   libunistring5 libxtables12 openssh-client sensible-utils sshpass systemd
-#8 11.26 0 upgraded, 28 newly installed, 0 to remove and 12 not upgraded.
-#8 11.26 Need to get 9498 kB of archives.
-#8 11.26 After this operation, 34.5 MB of additional disk space will be used.
-#8 11.26 Get:1 http://deb.debian.org/debian trixie/main amd64 libsystemd-shared amd64 257.13-1~deb13u1 [2155 kB]
-#8 12.29 Get:2 http://deb.debian.org/debian trixie/main amd64 libapparmor1 amd64 4.1.0-1 [43.7 kB]
-#8 12.30 Get:3 http://deb.debian.org/debian trixie/main amd64 systemd amd64 257.13-1~deb13u1 [3094 kB]
-#8 13.06 Get:4 http://deb.debian.org/debian trixie/main amd64 cron-daemon-common all 3.0pl1-197 [17.8 kB]
-#8 13.06 Get:5 http://deb.debian.org/debian trixie/main amd64 sensible-utils all 0.0.25 [25.0 kB]
-#8 13.06 Get:6 http://deb.debian.org/debian trixie/main amd64 cron amd64 3.0pl1-197 [87.4 kB]
-#8 13.07 Get:7 http://deb.debian.org/debian trixie/main amd64 libelf1t64 amd64 0.192-4 [189 kB]
-#8 13.12 Get:8 http://deb.debian.org/debian trixie/main amd64 libbpf1 amd64 1:1.5.0-3 [169 kB]
-#8 13.14 Get:9 http://deb.debian.org/debian trixie/main amd64 libmnl0 amd64 1.0.5-3 [11.9 kB]
-#8 13.14 Get:10 http://deb.debian.org/debian trixie/main amd64 libkrb5support0 amd64 1.21.3-5+deb13u1 [33.1 kB]
-#8 13.15 Get:11 http://deb.debian.org/debian trixie/main amd64 libcom-err2 amd64 1.47.2-3+b11 [25.0 kB]
-#8 13.17 Get:12 http://deb.debian.org/debian trixie/main amd64 libk5crypto3 amd64 1.21.3-5+deb13u1 [81.2 kB]
-#8 13.25 Get:13 http://deb.debian.org/debian trixie/main amd64 libkeyutils1 amd64 1.6.3-6 [9456 B]
-#8 13.25 Get:14 http://deb.debian.org/debian trixie/main amd64 libkrb5-3 amd64 1.21.3-5+deb13u1 [326 kB]
-#8 13.32 Get:15 http://deb.debian.org/debian trixie/main amd64 libgssapi-krb5-2 amd64 1.21.3-5+deb13u1 [138 kB]
-#8 13.38 Get:16 http://deb.debian.org/debian trixie/main amd64 libtirpc-common all 1.3.6+ds-1 [11.0 kB]
-#8 13.38 Get:17 http://deb.debian.org/debian trixie/main amd64 libtirpc3t64 amd64 1.3.6+ds-1 [83.3 kB]
-#8 13.42 Get:18 http://deb.debian.org/debian trixie/main amd64 libxtables12 amd64 1.8.11-2 [31.9 kB]
-#8 13.44 Get:19 http://deb.debian.org/debian trixie/main amd64 libcap2-bin amd64 1:2.75-10+deb13u1+b1 [36.4 kB]
-#8 13.53 Get:20 http://deb.debian.org/debian trixie/main amd64 iproute2 amd64 6.15.0-1 [1089 kB]
-#8 13.98 Get:21 http://deb.debian.org/debian trixie/main amd64 libunistring5 amd64 1.3-2 [477 kB]
-#8 14.17 Get:22 http://deb.debian.org/debian trixie/main amd64 libidn2-0 amd64 2.3.8-2 [109 kB]
-#8 14.22 Get:23 http://deb.debian.org/debian trixie/main amd64 iputils-ping amd64 3:20240905-3 [51.2 kB]
-#8 14.24 Get:24 http://deb.debian.org/debian trixie/main amd64 libedit2 amd64 3.1-20250104-1 [93.8 kB]
-#8 14.28 Get:25 http://deb.debian.org/debian trixie/main amd64 libcbor0.10 amd64 0.10.2-2 [28.3 kB]
-#8 14.29 Get:26 http://deb.debian.org/debian trixie/main amd64 libfido2-1 amd64 1.15.0-1+b1 [78.7 kB]
-#8 14.32 Get:27 http://deb.debian.org/debian trixie/main amd64 openssh-client amd64 1:10.0p1-7+deb13u4 [990 kB]
-#8 14.71 Get:28 http://deb.debian.org/debian trixie/main amd64 sshpass amd64 1.10-0.1 [12.7 kB]
-#8 15.22 debconf: unable to initialize frontend: Dialog
-#8 15.22 debconf: (TERM is not set, so the dialog frontend is not usable.)
-#8 15.22 debconf: falling back to frontend: Readline
-#8 15.22 debconf: unable to initialize frontend: Readline
-#8 15.22 debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 28.)
-#8 15.22 debconf: falling back to frontend: Teletype
-#8 15.25 debconf: unable to initialize frontend: Teletype
-#8 15.25 debconf: (This frontend requires a controlling tty.)
-#8 15.25 debconf: falling back to frontend: Noninteractive
-#8 16.71 Preconfiguring packages ...
-#8 16.94 Fetched 9498 kB in 4s (2550 kB/s)
-#8 17.04 Selecting previously unselected package libsystemd-shared:amd64.
-#8 17.04 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5645 files and directories currently installed.)
-#8 17.07 Preparing to unpack .../libsystemd-shared_257.13-1~deb13u1_amd64.deb ...
-#8 17.09 Unpacking libsystemd-shared:amd64 (257.13-1~deb13u1) ...
-#8 17.60 Selecting previously unselected package libapparmor1:amd64.
-#8 17.60 Preparing to unpack .../libapparmor1_4.1.0-1_amd64.deb ...
-#8 17.64 Unpacking libapparmor1:amd64 (4.1.0-1) ...
-#8 17.87 Setting up libsystemd-shared:amd64 (257.13-1~deb13u1) ...
-#8 18.17 Selecting previously unselected package systemd.
-#8 18.17 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5658 files and directories currently installed.)
-#8 18.20 Preparing to unpack .../systemd_257.13-1~deb13u1_amd64.deb ...
-#8 18.26 Unpacking systemd (257.13-1~deb13u1) ...
-#8 18.94 Selecting previously unselected package cron-daemon-common.
-#8 18.95 Preparing to unpack .../cron-daemon-common_3.0pl1-197_all.deb ...
-#8 18.97 Unpacking cron-daemon-common (3.0pl1-197) ...
-#8 19.28 Selecting previously unselected package sensible-utils.
-#8 19.28 Preparing to unpack .../sensible-utils_0.0.25_all.deb ...
-#8 19.30 Unpacking sensible-utils (0.0.25) ...
-#8 19.47 Setting up libapparmor1:amd64 (4.1.0-1) ...
-#8 19.52 Setting up systemd (257.13-1~deb13u1) ...
-#8 19.74 Created symlink '/etc/systemd/system/getty.target.wants/getty@tty1.service' → '/usr/lib/systemd/system/getty@.service'.
-#8 19.76 Created symlink '/etc/systemd/system/multi-user.target.wants/remote-fs.target' → '/usr/lib/systemd/system/remote-fs.target'.
-#8 19.78 Created symlink '/etc/systemd/system/sysinit.target.wants/systemd-pstore.service' → '/usr/lib/systemd/system/systemd-pstore.service'.
-#8 19.80 Initializing machine ID from random generator.
-#8 19.95 Creating group 'systemd-journal' with GID 999.
-#8 19.96 Creating group 'systemd-network' with GID 998.
-#8 19.96 Creating user 'systemd-network' (systemd Network Management) with UID 998 and GID 998.
-#8 20.09 /usr/lib/tmpfiles.d/legacy.conf:14: Duplicate line for path "/run/lock", ignoring.
-#8 20.18 Setting up cron-daemon-common (3.0pl1-197) ...
-#8 20.37 Creating group 'crontab' with GID 997.
-#8 20.67 Selecting previously unselected package cron.
-#8 20.67 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6644 files and directories currently installed.)
-#8 20.70 Preparing to unpack .../00-cron_3.0pl1-197_amd64.deb ...
-#8 20.73 Unpacking cron (3.0pl1-197) ...
-#8 21.05 Selecting previously unselected package libelf1t64:amd64.
-#8 21.05 Preparing to unpack .../01-libelf1t64_0.192-4_amd64.deb ...
-#8 21.06 Unpacking libelf1t64:amd64 (0.192-4) ...
-#8 21.25 Selecting previously unselected package libbpf1:amd64.
-#8 21.26 Preparing to unpack .../02-libbpf1_1%3a1.5.0-3_amd64.deb ...
-#8 21.28 Unpacking libbpf1:amd64 (1:1.5.0-3) ...
-#8 21.48 Selecting previously unselected package libmnl0:amd64.
-#8 21.48 Preparing to unpack .../03-libmnl0_1.0.5-3_amd64.deb ...
-#8 21.51 Unpacking libmnl0:amd64 (1.0.5-3) ...
-#8 21.67 Selecting previously unselected package libkrb5support0:amd64.
-#8 21.67 Preparing to unpack .../04-libkrb5support0_1.21.3-5+deb13u1_amd64.deb ...
-#8 21.69 Unpacking libkrb5support0:amd64 (1.21.3-5+deb13u1) ...
-#8 21.87 Selecting previously unselected package libcom-err2:amd64.
-#8 21.88 Preparing to unpack .../05-libcom-err2_1.47.2-3+b11_amd64.deb ...
-#8 21.90 Unpacking libcom-err2:amd64 (1.47.2-3+b11) ...
-#8 22.07 Selecting previously unselected package libk5crypto3:amd64.
-#8 22.07 Preparing to unpack .../06-libk5crypto3_1.21.3-5+deb13u1_amd64.deb ...
-#8 22.09 Unpacking libk5crypto3:amd64 (1.21.3-5+deb13u1) ...
-#8 22.28 Selecting previously unselected package libkeyutils1:amd64.
-#8 22.29 Preparing to unpack .../07-libkeyutils1_1.6.3-6_amd64.deb ...
-#8 22.30 Unpacking libkeyutils1:amd64 (1.6.3-6) ...
-#8 22.48 Selecting previously unselected package libkrb5-3:amd64.
-#8 22.48 Preparing to unpack .../08-libkrb5-3_1.21.3-5+deb13u1_amd64.deb ...
-#8 22.50 Unpacking libkrb5-3:amd64 (1.21.3-5+deb13u1) ...
-#8 22.86 Selecting previously unselected package libgssapi-krb5-2:amd64.
-#8 22.86 Preparing to unpack .../09-libgssapi-krb5-2_1.21.3-5+deb13u1_amd64.deb ...
-#8 22.88 Unpacking libgssapi-krb5-2:amd64 (1.21.3-5+deb13u1) ...
-#8 23.18 Selecting previously unselected package libtirpc-common.
-#8 23.18 Preparing to unpack .../10-libtirpc-common_1.3.6+ds-1_all.deb ...
-#8 23.20 Unpacking libtirpc-common (1.3.6+ds-1) ...
-#8 23.53 Selecting previously unselected package libtirpc3t64:amd64.
-#8 23.53 Preparing to unpack .../11-libtirpc3t64_1.3.6+ds-1_amd64.deb ...
-#8 23.57 Adding 'diversion of /lib/x86_64-linux-gnu/libtirpc.so.3 to /lib/x86_64-linux-gnu/libtirpc.so.3.usr-is-merged by libtirpc3t64'
-#8 23.61 Adding 'diversion of /lib/x86_64-linux-gnu/libtirpc.so.3.0.0 to /lib/x86_64-linux-gnu/libtirpc.so.3.0.0.usr-is-merged by libtirpc3t64'
-#8 23.63 Unpacking libtirpc3t64:amd64 (1.3.6+ds-1) ...
-#8 23.80 Selecting previously unselected package libxtables12:amd64.
-#8 23.81 Preparing to unpack .../12-libxtables12_1.8.11-2_amd64.deb ...
-#8 23.82 Unpacking libxtables12:amd64 (1.8.11-2) ...
-#8 23.96 Selecting previously unselected package libcap2-bin.
-#8 23.97 Preparing to unpack .../13-libcap2-bin_1%3a2.75-10+deb13u1+b1_amd64.deb ...
-#8 23.98 Unpacking libcap2-bin (1:2.75-10+deb13u1+b1) ...
-#8 24.21 Selecting previously unselected package iproute2.
-#8 24.22 Preparing to unpack .../14-iproute2_6.15.0-1_amd64.deb ...
-#8 24.42 Unpacking iproute2 (6.15.0-1) ...
-#8 24.76 Selecting previously unselected package libunistring5:amd64.
-#8 24.76 Preparing to unpack .../15-libunistring5_1.3-2_amd64.deb ...
-#8 24.78 Unpacking libunistring5:amd64 (1.3-2) ...
-#8 25.03 Selecting previously unselected package libidn2-0:amd64.
-#8 25.03 Preparing to unpack .../16-libidn2-0_2.3.8-2_amd64.deb ...
-#8 25.05 Unpacking libidn2-0:amd64 (2.3.8-2) ...
-#8 25.19 Selecting previously unselected package iputils-ping.
-#8 25.20 Preparing to unpack .../17-iputils-ping_3%3a20240905-3_amd64.deb ...
-#8 25.22 Unpacking iputils-ping (3:20240905-3) ...
-#8 25.39 Selecting previously unselected package libedit2:amd64.
-#8 25.39 Preparing to unpack .../18-libedit2_3.1-20250104-1_amd64.deb ...
-#8 25.41 Unpacking libedit2:amd64 (3.1-20250104-1) ...
-#8 25.75 Selecting previously unselected package libcbor0.10:amd64.
-#8 25.76 Preparing to unpack .../19-libcbor0.10_0.10.2-2_amd64.deb ...
-#8 25.84 Unpacking libcbor0.10:amd64 (0.10.2-2) ...
-#8 26.06 Selecting previously unselected package libfido2-1:amd64.
-#8 26.06 Preparing to unpack .../20-libfido2-1_1.15.0-1+b1_amd64.deb ...
-#8 26.08 Unpacking libfido2-1:amd64 (1.15.0-1+b1) ...
-#8 26.26 Selecting previously unselected package openssh-client.
-#8 26.27 Preparing to unpack .../21-openssh-client_1%3a10.0p1-7+deb13u4_amd64.deb ...
-#8 26.31 Unpacking openssh-client (1:10.0p1-7+deb13u4) ...
-#8 26.62 Selecting previously unselected package sshpass.
-#8 26.63 Preparing to unpack .../22-sshpass_1.10-0.1_amd64.deb ...
-#8 26.65 Unpacking sshpass (1.10-0.1) ...
-#8 26.84 Setting up libkeyutils1:amd64 (1.6.3-6) ...
-#8 26.88 Setting up libcbor0.10:amd64 (0.10.2-2) ...
-#8 26.93 Setting up libtirpc-common (1.3.6+ds-1) ...
-#8 27.00 Setting up libedit2:amd64 (3.1-20250104-1) ...
-#8 27.07 Setting up libcom-err2:amd64 (1.47.2-3+b11) ...
-#8 27.13 Setting up sshpass (1.10-0.1) ...
-#8 27.30 Setting up libelf1t64:amd64 (0.192-4) ...
-#8 27.35 Setting up libkrb5support0:amd64 (1.21.3-5+deb13u1) ...
-#8 27.41 Setting up libcap2-bin (1:2.75-10+deb13u1+b1) ...
-#8 27.47 Setting up libunistring5:amd64 (1.3-2) ...
-#8 27.66 Setting up libmnl0:amd64 (1.0.5-3) ...
-#8 27.71 Setting up libk5crypto3:amd64 (1.21.3-5+deb13u1) ...
-#8 27.76 Setting up libxtables12:amd64 (1.8.11-2) ...
-#8 27.80 Setting up sensible-utils (0.0.25) ...
-#8 27.87 Setting up libkrb5-3:amd64 (1.21.3-5+deb13u1) ...
-#8 27.93 Setting up libfido2-1:amd64 (1.15.0-1+b1) ...
-#8 27.99 Setting up libbpf1:amd64 (1:1.5.0-3) ...
-#8 28.05 Setting up cron (3.0pl1-197) ...
-#8 28.27 invoke-rc.d: could not determine current runlevel
-#8 28.29 invoke-rc.d: policy-rc.d denied execution of start.
-#8 28.68 Created symlink '/etc/systemd/system/multi-user.target.wants/cron.service' → '/usr/lib/systemd/system/cron.service'.
-#8 28.72 Setting up libidn2-0:amd64 (2.3.8-2) ...
-#8 28.77 Setting up libgssapi-krb5-2:amd64 (1.21.3-5+deb13u1) ...
-#8 28.83 Setting up iputils-ping (3:20240905-3) ...
-#8 28.88 Setting up libtirpc3t64:amd64 (1.3.6+ds-1) ...
-#8 28.94 Setting up iproute2 (6.15.0-1) ...
-#8 29.22 debconf: unable to initialize frontend: Dialog
-#8 29.22 debconf: (TERM is not set, so the dialog frontend is not usable.)
-#8 29.22 debconf: falling back to frontend: Readline
-#8 29.22 debconf: unable to initialize frontend: Readline
-#8 29.22 debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)
-#8 29.22 debconf: falling back to frontend: Teletype
-#8 29.24 debconf: unable to initialize frontend: Teletype
-#8 29.24 debconf: (This frontend requires a controlling tty.)
-#8 29.24 debconf: falling back to frontend: Noninteractive
-#8 29.58 Setting up openssh-client (1:10.0p1-7+deb13u4) ...
-#8 30.45 Created symlink '/etc/systemd/user/sockets.target.wants/ssh-agent.socket' → '/usr/lib/systemd/user/ssh-agent.socket'.
-#8 30.50 Processing triggers for libc-bin (2.41-12+deb13u3) ...
-#8 DONE 31.4s
-
-#9 [4/7] COPY requirements.txt .
-#9 DONE 0.5s
-
-#10 [5/7] RUN pip install --no-cache-dir -r requirements.txt
-#10 19.53 ERROR: Could not find a version that satisfies the requirement paramiko>=3.4.0 (from versions: none)
-#10 24.93 ERROR: No matching distribution found for paramiko>=3.4.0
-#10 ERROR: process "/bin/sh -c pip install --no-cache-dir -r requirements.txt" did not complete successfully: exit code: 1
-------
- > [5/7] RUN pip install --no-cache-dir -r requirements.txt:
-19.53 ERROR: Could not find a version that satisfies the requirement paramiko>=3.4.0 (from versions: none)
-24.93 ERROR: No matching distribution found for paramiko>=3.4.0
-------
-Dockerfile:15
-
---------------------
-
-  13 |     COPY requirements.txt .
-
-  14 |     
-
-  15 | >>> RUN pip install --no-cache-dir -r requirements.txt
-
-  16 |     
-
-  17 |     COPY . .
-
---------------------
-
-failed to solve: process "/bin/sh -c pip install --no-cache-dir -r requirements.txt" did not complete successfully: exit code: 1
-
