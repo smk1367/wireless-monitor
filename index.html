@@ -119,26 +119,95 @@ textarea{
     color:#e5e7eb
 }
 
-.tab.active{
-    background:#2563eb
-}
-
 .table{
-    overflow:auto
+    overflow:auto;
 }
 
 .table table{
     width:100%;
-    border-collapse:collapse
+    border-collapse:collapse;
+    table-layout:fixed;
 }
 
 .table th,
 .table td{
-    padding:9px;
-    border-bottom:
-        1px solid #334155;
+    padding:6px 8px;
+    border-bottom:1px solid #334155;
     text-align:right;
-    white-space:nowrap
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    font-size:13px;
+}
+
+/* IP */
+.table th:nth-child(1),
+.table td:nth-child(1){
+    width:100px;
+}
+
+/* Type */
+.table th:nth-child(2),
+.table td:nth-child(2){
+    width:110px;
+}
+
+/* Name */
+.table th:nth-child(3),
+.table td:nth-child(3){
+    width:180px;
+    text-align:left;
+    direction:ltr;
+}
+
+/* SSID */
+.table th:nth-child(4),
+.table td:nth-child(4){
+    width:180px;
+    text-align:left;
+    direction:ltr;
+}
+
+/* Frequency */
+.table th:nth-child(5),
+.table td:nth-child(5){
+    width:90px;
+}
+
+/* Power */
+.table th:nth-child(6),
+.table td:nth-child(6){
+    width:65px;
+    text-align:center;
+}
+
+/* Signal */
+.table th:nth-child(7),
+.table td:nth-child(7){
+    width:70px;
+    text-align:center;
+}
+
+/* MAC */
+.table th:nth-child(8),
+.table td:nth-child(8){
+    width:145px;
+    text-align:left;
+    direction:ltr;
+    font-family:monospace;
+}
+
+/* Status */
+.table th:nth-child(9),
+.table td:nth-child(9){
+    width:75px;
+    text-align:center;
+}
+
+/* Update */
+.table th:nth-child(10),
+.table td:nth-child(10){
+    width:140px;
 }
 
 .muted{
@@ -2188,6 +2257,61 @@ async function saveManualData(){
 }
 
 
+/* EXCEL_FEATURE_JS */
+
+async function importExcelFile(){
+
+    const input = document.getElementById("excelFile");
+    const status = document.getElementById("excelStatus");
+
+    if(!input || !input.files.length){
+        alert("ابتدا یک فایل Excel انتخاب کنید");
+        return;
+    }
+
+    const form = new FormData();
+    form.append("file", input.files[0]);
+    status.textContent = "در حال وارد کردن اطلاعات...";
+
+    try{
+        const response = await fetch(
+            API + "/api/excel/import",
+            {
+                method: "POST",
+                headers: { "Authorization": AUTH },
+                body: form
+            }
+        );
+
+        let result = {};
+        try { result = await response.json(); } catch {}
+
+        if(!response.ok){
+            throw new Error(
+                result.message || result.error || `HTTP ${response.status}`
+            );
+        }
+
+        status.innerHTML =
+            `✅ ${result.updated} دستگاه بروزرسانی شد.` +
+            (result.not_found ? ` ${result.not_found} IP در سیستم پیدا نشد.` : "");
+
+        input.value = "";
+    }
+    catch(e){
+        status.innerHTML = "❌ خطا: " + h(e.message);
+    }
+}
+
+function downloadExcelTemplate(){
+    window.location.href = API + "/api/excel/template";
+}
+
+function exportExcelFile(){
+    window.location.href = API + "/api/excel/export";
+}
+
+
 /* ============================================================
    Admin
    ============================================================ */
@@ -2277,6 +2401,58 @@ function openAdmin(){
                     ></div>
 
                 </div>
+                <!-- EXCEL_FEATURE_CARD -->
+                <div class="card">
+
+                    <h3>
+                        📊 اطلاعات آنتن از Excel
+                    </h3>
+
+                    <p class="muted">
+                        فایل Excel با IP دستگاه‌ها تطبیق داده می‌شود.
+                    </p>
+
+                    <input
+                        id="excelFile"
+                        type="file"
+                        accept=".xlsx,.xlsm"
+                    >
+
+                    <br><br>
+
+                    <div class="toolbar">
+
+                        <button
+                            class="btn primary"
+                            onclick="importExcelFile()"
+                        >
+                            ⬆️ Import Excel
+                        </button>
+
+                        <button
+                            class="btn"
+                            onclick="downloadExcelTemplate()"
+                        >
+                            📥 قالب Excel
+                        </button>
+
+                        <button
+                            class="btn"
+                            onclick="exportExcelFile()"
+                        >
+                            📤 Export Excel
+                        </button>
+
+                    </div>
+
+                    <div
+                        id="excelStatus"
+                        class="scan-status"
+                    ></div>
+
+                </div>
+
+
 
 
                 <div class="card">
