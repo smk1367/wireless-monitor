@@ -65,12 +65,45 @@ LEGACY_SSH_FALLBACK = os.getenv("LEGACY_SSH_FALLBACK", "1").strip().lower() in {
 SNMP_ENABLED = os.getenv("SNMP_ENABLED", "1").strip().lower() in {
     "1", "true", "yes", "on"
 }
-SNMP_PORT = int(os.getenv("SNMP_PORT", "161"))
-SNMP_VERSION = os.getenv("SNMP_VERSION", "2c").strip().lower()
-SNMP_TIMEOUT = float(os.getenv("SNMP_TIMEOUT", "2.5"))
-SNMP_RETRIES = int(os.getenv("SNMP_RETRIES", "1"))
-SNMP_COMMUNITY = os.getenv("SNMP_COMMUNITY", "ngstehwl")
 
+SNMP_PORT = int(os.getenv("SNMP_PORT", "161"))
+
+SNMP_VERSION = os.getenv(
+    "SNMP_VERSION",
+    "2c",
+).strip().lower()
+
+SNMP_TIMEOUT = float(
+    os.getenv(
+        "SNMP_TIMEOUT",
+        "3",
+    )
+)
+
+SNMP_RETRIES = int(
+    os.getenv(
+        "SNMP_RETRIES",
+        "2",
+    )
+)
+
+# فقط community خودمان
+SNMP_COMMUNITY = (
+    os.getenv("SNMP_COMMUNITY")
+    or "ngstehwl"
+).strip()
+
+
+def _snmp_credentials():
+    return [
+        {
+            "community": SNMP_COMMUNITY,
+            "id": "ngstehwl",
+        }
+    ]
+
+
+SNMP_CREDENTIALS = _snmp_credentials()
 
 # ============================================================
 # Generic helpers
@@ -2029,41 +2062,1062 @@ def cisco_info(ip, client):
 # ============================================================
 # Racom
 # ============================================================
+# ============================================================
+# RACOM SNMP FIX
+# Replace the existing RACOM/SNMP detection section in scanner.py
+# ============================================================
 
-def racom_info(ip, client):
-    data = {
-        "ip_address": ip,
-        "device_type": "Racom",
-        "vendor": "Racom",
+RACOM_ENTERPRISE_OID = "1.3.6.1.4.1.33555"
+
+# RAy2 root:
+# 1.3.6.1.4.1.33555.1
+#
+# RAy3 root:
+# 1.3.6.1.4.1.33555.4
+#
+# RACOM RAY-MIB / RAY3-MIB:
+# productName, serialNumber, deviceName, swVer, MAC,
+# rxFreq, txFreq, txChannel, rfPowerCurrent, rss, snr, ...
+#
+# RACOM official documentation:
+# https://www.racom.eu/eng/products/m/ray/app/snmp/SNP_protokol.html
+# https://www.racom.eu/eng/products/m/ray/app/snmp-ray3/ray3.html
+
+def _racom_oid(root, *parts):
+    return ".".join(
+        [RACOM_ENTERPRISE_OID, str(root)] + [str(x) for x in parts]
+    )
+
+
+def _parse_int(value):
+    if missing(value):
+        return None
+
+    text = safe_text(value)
+
+    text = re.sub(
+        r"^(INTEGER|Gauge32|Integer32|Counter32|Counter64|Timeticks):\s*",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0))
+    except Exception:
+        return None
+
+
+def _format_dbm(value):
+    number = _parse_int(value)
+
+    if number is None:
+        return ""
+
+    return f"{number:g} dBm"
+
+
+def _format_mhz_from_khz(value):
+    number = _parse_int(value)
+
+    if number is None:
+        return ""
+
+    # RACOM reports radio frequency in kHz.
+    mhz = number / 1000.0
+
+    return f"{mhz:g}"
+
+
+def _format_mhz_from_khz_with_unit(value):
+    number = _parse_int(value)
+
+    if number is None:
+        return ""
+
+    mhz = number / 1000.0
+
+    return f"{mhz:g} MHz"
+
+
+def _format_tenths(value, unit=""):
+    number = _parse_int(value)
+
+    if number is None:
+        return ""
+
+    number = number / 10.0
+
+    if unit:
+        return f"{number:g} {unit}"
+
+    return f"{number:g}"
+
+
+def _format_hundredths(value, unit=""):
+    number = _parse_int(value)
+
+    if number is None:
+        return ""
+
+    number = number / 100.0
+
+    if unit:
+        return f"{number:g} {unit}"
+
+    return f"{number:g}"
+
+
+def _racom_root_from_object_id(sys_object_id=""):
+    """
+    RACOM:
+      RAy2 -> 1.3.6.1.4.1.33555.1
+      RAy3 -> 1.3.6.1.4.1.33555.4
+    """
+
+    oid = safe_text(sys_object_id).strip()
+
+    if oid.startswith(f"{RACOM_ENTERPRISE_OID}.4"):
+        return "4"
+
+    if oid.startswith(f"{RACOM_ENTERPRISE_OID}.1"):
+        return "1"
+
+    return ""
+
+
+def _racom_detected_by_text(sys_descr="", sys_object_id=""):
+    text = (
+        safe_text(sys_descr)
+        + " "
+        + safe_text(sys_object_id)
+    ).lower()
+
+    if "racom" in text:
+        return True
+
+    if "microwave link" in text:
+        return True
+
+    if "ray2" in text:
+        return True
+
+    if "ray3" in text:
+        return True
+
+    if RACOM_ENTERPRISE_OID in text:
+        return True
+
+    return False
+
+
+def _racom_oid_map(root):
+    """
+    Build all RACOM RAy2 / RAy3 scalar OIDs.
+
+    RAy2:
+      33555.1
+
+    RAy3:
+      33555.4
+    """
+
+    return {
+        # ----------------------------------------------------
+        # Product
+        # ----------------------------------------------------
+        "product_name": _racom_oid(root, 1, 1, 1, 0),
+        "serial_number": _racom_oid(root, 1, 1, 2, 0),
+        "unit_type": _racom_oid(root, 1, 1, 3, 0),
+
+        # ----------------------------------------------------
+        # Info
+        # ----------------------------------------------------
+        "device_name": _racom_oid(root, 1, 2, 1, 0),
+        "sw_ver": _racom_oid(root, 1, 2, 2, 0),
+        "sw_ver_radio": _racom_oid(root, 1, 2, 3, 0),
+
+        # ----------------------------------------------------
+        # Status
+        # ----------------------------------------------------
+        "system_status": _racom_oid(root, 1, 3, 1, 0),
+        "peer_number": _racom_oid(root, 1, 3, 3, 0),
+        "line_status_ii": _racom_oid(root, 1, 3, 8, 0),
+        "secure_peer_mode": _racom_oid(root, 1, 3, 7, 0),
+        "eth1_link": _racom_oid(root, 1, 3, 9, 0),
+        "eth2_link": _racom_oid(root, 1, 3, 10, 0),
+
+        # ----------------------------------------------------
+        # Chassis
+        # ----------------------------------------------------
+        "temperature_modem": _racom_oid(root, 1, 4, 1, 0),
+        "temperature_radio": _racom_oid(root, 1, 4, 2, 0),
+        "voltage_unit": _racom_oid(root, 1, 4, 3, 0),
+        "voltage_source": _racom_oid(root, 1, 4, 4, 0),
+
+        # ----------------------------------------------------
+        # System
+        # ----------------------------------------------------
+        "cpu": _racom_oid(root, 1, 5, 1, 0),
+        "memory": _racom_oid(root, 1, 5, 2, 0),
+        "log_storage": _racom_oid(root, 1, 5, 3, 0),
+
+        # ----------------------------------------------------
+        # Access
+        # ----------------------------------------------------
+        "access_ip": _racom_oid(root, 1, 6, 4, 0),
+        "access_mac": _racom_oid(root, 1, 6, 5, 0),
+        "management_vlan": _racom_oid(root, 1, 6, 6, 0),
+        "management_vlan_id": _racom_oid(root, 1, 6, 7, 0),
+        "wifi_hap": _racom_oid(root, 1, 6, 8, 0),
+
+        # ----------------------------------------------------
+        # Radio interface
+        # ----------------------------------------------------
+        "rx_channel": _racom_oid(root, 2, 1, 1, 0),
+        "tx_channel": _racom_oid(root, 2, 1, 2, 0),
+        "rx_freq": _racom_oid(root, 2, 1, 3, 0),
+        "tx_freq": _racom_oid(root, 2, 1, 4, 0),
+        "rx_modulation": _racom_oid(root, 2, 1, 5, 0),
+        "tx_modulation": _racom_oid(root, 2, 1, 6, 0),
+        "rx_modulation_index": _racom_oid(root, 2, 1, 7, 0),
+        "tx_modulation_index": _racom_oid(root, 2, 1, 8, 0),
+        "rf_power_configured": _racom_oid(root, 2, 1, 12, 0),
+        "net_bitrate": _racom_oid(root, 2, 1, 13, 0),
+        "max_net_bitrate": _racom_oid(root, 2, 1, 14, 0),
+        "tx_bandwidth_khz": _racom_oid(root, 2, 1, 15, 0),
+        "channel_arrangement": _racom_oid(root, 2, 1, 16, 0),
+        "rf_power_current": _racom_oid(root, 2, 1, 17, 0),
+
+        # RAy3 additions
+        "acm": _racom_oid(root, 2, 1, 18, 0),
+        "atpc": _racom_oid(root, 2, 1, 19, 0),
+        "frequency_table": _racom_oid(root, 2, 1, 20, 0),
+        "rx_bandwidth_khz": _racom_oid(root, 2, 1, 21, 0),
+
+        # ----------------------------------------------------
+        # Radio statistics
+        # ----------------------------------------------------
+        "rss": _racom_oid(root, 3, 2, 1, 0),
+        "snr": _racom_oid(root, 3, 2, 2, 0),
+        "time_all_connect": _racom_oid(root, 3, 2, 5, 0),
+        "time_all_disconnect": _racom_oid(root, 3, 2, 6, 0),
+        "time_max_disconnect": _racom_oid(root, 3, 2, 7, 0),
+        "num_disconnect": _racom_oid(root, 3, 2, 8, 0),
+        "reliability": _racom_oid(root, 3, 2, 9, 0),
+        "link_uptime": _racom_oid(root, 3, 2, 10, 0),
+        "ber": _racom_oid(root, 3, 2, 11, 0),
+
+        # RAy3
+        "mse": _racom_oid(root, 3, 2, 12, 0),
+
+        # ----------------------------------------------------
+        # Ethernet statistics
+        # ----------------------------------------------------
+        "eth_in_throughput": _racom_oid(root, 3, 3, 1, 0),
+        "eth_out_throughput": _racom_oid(root, 3, 3, 2, 0),
+        "eth2_in_throughput": _racom_oid(root, 3, 3, 3, 0),
+        "eth2_out_throughput": _racom_oid(root, 3, 3, 4, 0),
     }
 
-    sys_info = run_cmd(client, "show system") or run_cmd(client, "system info")
-    radio = run_cmd(client, "show radio") or run_cmd(client, "radio info")
-    signal = run_cmd(client, "show signal") or run_cmd(client, "radio signal")
 
-    data["hostname"] = first_value(sys_info, "Hostname", "Name")
-    data["model"] = first_value(sys_info, "Model", "Type")
-    data["firmware_version"] = first_value(sys_info, "Firmware", "SW version", "Version")
-    data["uptime"] = first_value(sys_info, "Uptime")
-    data["frequency"] = first_value(radio, "Frequency", "Rx frequency", "Tx frequency")
-    data["tx_power"] = first_value(radio, "Tx power", "Power", "Output power")
-    data["bandwidth"] = first_value(radio, "Bandwidth", "Channel bandwidth")
-    data["mode"] = first_value(radio, "Mode", "Radio mode")
-    data["ssid"] = first_value(radio, "SSID", "Network ID")
-    data["mac_address"] = normalize_mac(first_value(radio, "MAC", "MAC address"))
+def racom_snmp_info(ip, sys_object_id=""):
+    """
+    Real RACOM SNMP reader.
 
-    signal_match = re.search(r"-?\d+(?:\.\d+)?\s*dBm", signal, re.I)
-    if signal_match:
-        data["signal_strength"] = signal_match.group(0)
-        data["rx_power"] = signal_match.group(0)
+    Supports:
+      - RAy2
+      - RAy3
+    """
+
+    roots_to_try = []
+
+    detected_root = _racom_root_from_object_id(
+        sys_object_id
+    )
+
+    if detected_root:
+        roots_to_try.append(detected_root)
+
+    # Fallback order.
+    for root in ("4", "1"):
+        if root not in roots_to_try:
+            roots_to_try.append(root)
+
+    last_raw = {}
+
+    for root in roots_to_try:
+        oids = _racom_oid_map(root)
+
+        result = snmp_get(
+            ip,
+            list(oids.values()),
+        )
+
+        values = result.get("values", {})
+
+        if not values:
+            continue
+
+        reverse = {
+            oid: name
+            for name, oid in oids.items()
+        }
+
+        by_name = {}
+
+        for oid, value in values.items():
+            name = reverse.get(oid)
+
+            if name:
+                by_name[name] = value
+
+        last_raw = {
+            "root": root,
+            "values": by_name,
+            "credential_id": result.get(
+                "credential_id",
+                "",
+            ),
+            "community": result.get(
+                "community",
+                "",
+            ),
+        }
+
+        # Need at least one real RACOM field.
+        racom_markers = (
+            "product_name",
+            "device_name",
+            "sw_ver",
+            "access_mac",
+            "rx_freq",
+            "tx_freq",
+            "rss",
+        )
+
+        if not any(
+            not missing(by_name.get(marker))
+            for marker in racom_markers
+        ):
+            continue
+
+        data = {
+            "ip_address": ip,
+            "device_type": (
+                "Racom RAy3"
+                if root == "4"
+                else "Racom RAy2"
+            ),
+            "vendor": "Racom",
+
+            # ------------------------------------------------
+            # Basic information
+            # ------------------------------------------------
+            "hostname": first_nonempty(
+                by_name.get("device_name"),
+            ),
+
+            "model": first_nonempty(
+                by_name.get("product_name"),
+            ),
+
+            "firmware_version": first_nonempty(
+                by_name.get("sw_ver"),
+                by_name.get("sw_ver_radio"),
+            ),
+
+            "serial_number": first_nonempty(
+                by_name.get("serial_number"),
+            ),
+
+            "mac_address": normalize_mac(
+                first_nonempty(
+                    by_name.get("access_mac"),
+                )
+            ),
+
+            # ------------------------------------------------
+            # RF
+            # ------------------------------------------------
+            "channel": first_nonempty(
+                by_name.get("tx_channel"),
+                by_name.get("rx_channel"),
+            ),
+
+            "frequency": first_nonempty(
+                _format_mhz_from_khz(
+                    by_name.get("tx_freq")
+                ),
+                _format_mhz_from_khz(
+                    by_name.get("rx_freq")
+                ),
+            ),
+
+            "tx_power": first_nonempty(
+                _format_dbm(
+                    by_name.get("rf_power_current")
+                ),
+                _format_dbm(
+                    by_name.get("rf_power_configured")
+                ),
+            ),
+
+            "rx_power": first_nonempty(
+                _format_tenths(
+                    by_name.get("rss"),
+                    "dBm",
+                ),
+            ),
+
+            "receive_power": first_nonempty(
+                _format_tenths(
+                    by_name.get("rss"),
+                    "dBm",
+                ),
+            ),
+
+            "signal_strength": first_nonempty(
+                _format_tenths(
+                    by_name.get("rss"),
+                    "dBm",
+                ),
+            ),
+
+            "snr": first_nonempty(
+                _format_tenths(
+                    by_name.get("snr"),
+                    "dB",
+                ),
+            ),
+
+            "bandwidth": "",
+
+            "ssid": "",
+
+            "mode": "",
+
+            "peer_tx_signal": "",
+
+            "noise_floor": "",
+
+            "ccq": "",
+
+            "tx_power_mode": "",
+
+            # ------------------------------------------------
+            # Status
+            # ------------------------------------------------
+            "scan_status": "success",
+        }
+
+        # ----------------------------------------------------
+        # Bandwidth
+        # ----------------------------------------------------
+
+        bandwidth_khz = _parse_int(
+            by_name.get("tx_bandwidth_khz")
+        )
+
+        if bandwidth_khz is None:
+            bandwidth_khz = _parse_int(
+                by_name.get("rx_bandwidth_khz")
+            )
+
+        if bandwidth_khz is not None and bandwidth_khz > 0:
+            data["bandwidth"] = (
+                f"{bandwidth_khz / 1000.0:g} MHz"
+            )
+
+        # RAy2 has an enum bandwidth instead of
+        # txBandwidthKHz.
+        if missing(data.get("bandwidth")):
+            bandwidth_enum = _parse_int(
+                by_name.get("bandwidth")
+            )
+
+            if bandwidth_enum == 1:
+                data["bandwidth"] = "28 MHz"
+            elif bandwidth_enum == 2:
+                data["bandwidth"] = "14 MHz"
+            elif bandwidth_enum == 3:
+                data["bandwidth"] = "7 MHz"
+
+        # ----------------------------------------------------
+        # TX power mode
+        # ----------------------------------------------------
+
+        atpc = _parse_int(
+            by_name.get("atpc")
+        )
+
+        if atpc == 1:
+            data["tx_power_mode"] = "ATPC ON"
+        elif atpc == 2:
+            data["tx_power_mode"] = "ATPC OFF"
+
+        # ----------------------------------------------------
+        # Radio modulation can be useful as mode.
+        # ----------------------------------------------------
+
+        modulation = first_nonempty(
+            by_name.get("tx_modulation"),
+            by_name.get("rx_modulation"),
+        )
+
+        if modulation:
+            data["mode"] = modulation
+
+        # ----------------------------------------------------
+        # Frequency normalization
+        # ----------------------------------------------------
+
+        if data.get("frequency"):
+            data["frequency"] = re.sub(
+                r"\s*MHz\s*$",
+                "",
+                safe_text(data["frequency"]),
+                flags=re.I,
+            ).strip()
+
+        # ----------------------------------------------------
+        # Serial fallback
+        # ----------------------------------------------------
+
+        if missing(data.get("serial_number")):
+            data["serial_number"] = first_nonempty(
+                data.get("mac_address"),
+            )
+
+        # ----------------------------------------------------
+        # Raw data
+        # ----------------------------------------------------
+
+        data["raw_data"] = json.dumps(
+            {
+                "mode": "racom-snmp",
+                "product": (
+                    "RAy3"
+                    if root == "4"
+                    else "RAy2"
+                ),
+                "root": root,
+                "oid_base": (
+                    f"{RACOM_ENTERPRISE_OID}.{root}"
+                ),
+                "snmp": last_raw,
+                "dashboard_fields": {
+                    "hostname": data.get(
+                        "hostname",
+                        "",
+                    ),
+                    "model": data.get(
+                        "model",
+                        "",
+                    ),
+                    "firmware_version": data.get(
+                        "firmware_version",
+                        "",
+                    ),
+                    "serial_number": data.get(
+                        "serial_number",
+                        "",
+                    ),
+                    "mac_address": data.get(
+                        "mac_address",
+                        "",
+                    ),
+                    "ssid": data.get(
+                        "ssid",
+                        "",
+                    ),
+                    "frequency": data.get(
+                        "frequency",
+                        "",
+                    ),
+                    "tx_power": data.get(
+                        "tx_power",
+                        "",
+                    ),
+                    "rx_power": data.get(
+                        "rx_power",
+                        "",
+                    ),
+                    "signal_strength": data.get(
+                        "signal_strength",
+                        "",
+                    ),
+                    "channel": data.get(
+                        "channel",
+                        "",
+                    ),
+                    "bandwidth": data.get(
+                        "bandwidth",
+                        "",
+                    ),
+                    "mode": data.get(
+                        "mode",
+                        "",
+                    ),
+                    "peer_tx_signal": data.get(
+                        "peer_tx_signal",
+                        "",
+                    ),
+                    "tx_power_mode": data.get(
+                        "tx_power_mode",
+                        "",
+                    ),
+                    "noise_floor": data.get(
+                        "noise_floor",
+                        "",
+                    ),
+                    "ccq": data.get(
+                        "ccq",
+                        "",
+                    ),
+                    "snr": data.get(
+                        "snr",
+                        "",
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        )
+
+        return (
+            data,
+            f"snmp:{result.get('credential_id', 'unknown')}",
+        )
+
+    raise RuntimeError(
+        "RACOM SNMP OIDs returned no usable data"
+    )
+
+
+# ============================================================
+# SNMP credential fix
+# ============================================================
+
+def _snmp_credentials():
+    out = []
+
+    raw = os.getenv(
+        "SNMP_COMMUNITIES_JSON",
+        "",
+    ).strip()
+
+    if raw:
+        try:
+            parsed = json.loads(raw)
+
+            if isinstance(parsed, list):
+                for item in parsed:
+
+                    if isinstance(item, str):
+                        community = item.strip()
+
+                        if community:
+                            out.append({
+                                "community": community,
+                                "id": (
+                                    f"json-{len(out) + 1}"
+                                ),
+                            })
+
+                    elif isinstance(item, dict):
+                        community = safe_text(
+                            item.get("community")
+                        )
+
+                        if community:
+                            out.append({
+                                "community": community,
+                                "id": item.get(
+                                    "id",
+                                    f"json-{len(out) + 1}",
+                                ),
+                            })
+
+        except Exception as exc:
+            logger.warning(
+                "Invalid SNMP_COMMUNITIES_JSON: %s",
+                exc,
+            )
+
+    # User-configured community first.
+    if SNMP_COMMUNITY.strip():
+        out.append({
+            "community": SNMP_COMMUNITY.strip(),
+            "id": "ngstehwl",
+        })
+
+
+    uniq = []
+    seen = set()
+
+    for item in out:
+        community = item["community"]
+
+        if community not in seen:
+            uniq.append(item)
+            seen.add(community)
+
+    return uniq
+
+
+SNMP_CREDENTIALS = _snmp_credentials()
+
+
+# ============================================================
+# SNMP detection - FIXED
+# ============================================================
+
+def detect_from_snmp(
+    sys_descr,
+    sys_object_id="",
+):
+    text = (
+        safe_text(sys_descr)
+        + " "
+        + safe_text(sys_object_id)
+    ).lower()
+
+    # RACOM MUST BE BEFORE generic "unknown".
+    if _racom_detected_by_text(
+        sys_descr,
+        sys_object_id,
+    ):
+        return "racom"
+
+    if "mikrotik" in text:
+        return "mikrotik"
+
+    if "routeros" in text:
+        return "mikrotik"
+
+    if "cisco" in text:
+        return "cisco"
+
+    if "ios" in text:
+        return "cisco"
+
+    if "nx-os" in text:
+        return "cisco"
+
+    return "unknown"
+
+
+# ============================================================
+# SNMP-only fallback - FIXED
+# ============================================================
+
+def snmp_only_info(ip):
+    if not SNMP_ENABLED:
+        raise RuntimeError(
+            "SNMP disabled"
+        )
+
+    standard_data, standard_raw, standard_result = (
+        snmp_standard_info(ip)
+    )
+
+    if not standard_result.get("values"):
+        raise RuntimeError(
+            "SNMP unavailable"
+        )
+
+    values = standard_result.get(
+        "values",
+        {},
+    )
+
+    sys_descr = safe_text(
+        values.get(
+            SNMP_OIDS["sysDescr"]
+        )
+    )
+
+    sys_object_id = safe_text(
+        values.get(
+            SNMP_OIDS["sysObjectID"]
+        )
+    )
+
+    # --------------------------------------------------------
+    # RACOM
+    # --------------------------------------------------------
+
+    if _racom_detected_by_text(
+        sys_descr,
+        sys_object_id,
+    ):
+        data, credential_id = (
+            racom_snmp_info(
+                ip,
+                sys_object_id,
+            )
+        )
+
+        # Keep standard values that RACOM does not supply.
+        merge_missing(
+            data,
+            standard_data,
+        )
+
+        # RACOM values are authoritative.
+        data["vendor"] = "Racom"
+
+        root = _racom_root_from_object_id(
+            sys_object_id
+        )
+
+        if root == "4":
+            data["device_type"] = "Racom RAy3"
+        else:
+            data["device_type"] = "Racom RAy2"
+
+        data["scan_status"] = "success"
+
+        try:
+            raw = json.loads(
+                data.get(
+                    "raw_data",
+                    "{}",
+                )
+            )
+
+            if not isinstance(
+                raw,
+                dict,
+            ):
+                raw = {}
+
+        except Exception:
+            raw = {}
+
+        raw["standard_snmp"] = standard_raw
+        raw["sys_descr"] = sys_descr
+        raw["sys_object_id"] = sys_object_id
+
+        data["raw_data"] = json.dumps(
+            raw,
+            ensure_ascii=False,
+        )
+
+        return data, credential_id
+
+    # --------------------------------------------------------
+    # Mimosa
+    # --------------------------------------------------------
+
+    mimosa_detect = detect_mimosa_c5c(ip)
+
+    if mimosa_detect.get("is_mimosa"):
+        radio_data, radio_raw = (
+            mimosa_c5c_snmp_radio(ip)
+        )
+
+        if not radio_data:
+            raise RuntimeError(
+                "Mimosa C5c SNMP unavailable"
+            )
+
+        data = {
+            "ip_address": ip,
+            "device_type": "Mimosa C5c",
+            "vendor": "Mimosa",
+            "model": "C5c",
+            "scan_status": "success",
+        }
+
+        merge_missing(
+            data,
+            standard_data,
+        )
+
+        merge_missing(
+            data,
+            radio_data,
+        )
+
+        for field in (
+            "hostname",
+            "firmware_version",
+            "serial_number",
+            "mac_address",
+            "ssid",
+            "frequency",
+            "bandwidth",
+            "mode",
+            "tx_power",
+            "rx_power",
+            "receive_power",
+            "signal_strength",
+            "noise_floor",
+            "snr",
+        ):
+            if not missing(
+                radio_data.get(field)
+            ):
+                data[field] = radio_data[field]
+
+        data["raw_data"] = json.dumps(
+            {
+                "snmp": standard_raw,
+                "mimosa": radio_raw,
+                "mode": "mimosa-c5c-snmp",
+                "sys_descr": sys_descr,
+                "sys_object_id": sys_object_id,
+            },
+            ensure_ascii=False,
+        )
+
+        return (
+            data,
+            f"snmp:{standard_result.get('credential_id', 'unknown')}",
+        )
+
+    # --------------------------------------------------------
+    # Generic SNMP
+    # --------------------------------------------------------
+
+    device_type = detect_from_snmp(
+        sys_descr,
+        sys_object_id,
+    )
+
+    data = {
+        "ip_address": ip,
+        "device_type": {
+            "mikrotik": "MikroTik",
+            "cisco": "Cisco",
+            "racom": "Racom",
+        }.get(
+            device_type,
+            "Unknown",
+        ),
+        "vendor": {
+            "mikrotik": "MikroTik",
+            "cisco": "Cisco",
+            "racom": "Racom",
+        }.get(
+            device_type,
+            "",
+        ),
+        "scan_status": "success",
+    }
+
+    merge_missing(
+        data,
+        standard_data,
+    )
+
+    data["mac_address"] = normalize_mac(
+        data.get(
+            "mac_address",
+            "",
+        )
+    )
 
     data["raw_data"] = json.dumps(
-        {"system": sys_info[:3000], "radio": radio[:3000], "signal": signal[:1500]},
+        {
+            "snmp": standard_raw,
+            "mode": "snmp-only",
+            "sys_descr": sys_descr,
+            "sys_object_id": sys_object_id,
+        },
         ensure_ascii=False,
     )
-    data["scan_status"] = "success"
-    return data
 
+    return (
+        data,
+        f"snmp:{standard_result.get('credential_id', 'unknown')}",
+    )
+
+
+# ============================================================
+# OPTIONAL: make RACOM work even if sysDescr is only
+# "Microwave Link"
+# ============================================================
+
+def snmp_standard_info(ip):
+    result = snmp_get(
+        ip,
+        list(SNMP_OIDS.values()),
+    )
+
+    values = result.get(
+        "values",
+        {},
+    )
+
+    reverse = {
+        oid: name
+        for name, oid in SNMP_OIDS.items()
+    }
+
+    by_name = {
+        reverse.get(
+            oid,
+            oid,
+        ): value
+        for oid, value in values.items()
+    }
+
+    data = {
+        "hostname": first_nonempty(
+            by_name.get("sysName")
+        ),
+
+        "firmware_version": first_nonempty(
+            by_name.get("sysDescr")
+        ),
+
+        "uptime": first_nonempty(
+            by_name.get("sysUpTime")
+        ),
+
+        "mac_address": normalize_mac(
+            by_name.get(
+                "ifPhysAddress.1"
+            )
+        ),
+    }
+
+    raw = {
+        "system": by_name,
+        "credential_id": result.get(
+            "credential_id"
+        ),
+        "community": result.get(
+            "community"
+        ),
+    }
+
+    return (
+        data,
+        raw,
+        result,
+    )
+
+
+# ============================================================
+# IMPORTANT:
+# Keep the existing scan_single_ip() exactly as it is.
+#
+# This existing code already does:
+#
+#     try SSH
+#     ...
+#     except:
+#         SNMP fallback
+#
+# and now snmp_only_info() recognizes RACOM correctly.
+# ============================================================
 
 # ============================================================
 # Detection
