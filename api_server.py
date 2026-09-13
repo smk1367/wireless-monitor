@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 
 import os
@@ -6,7 +7,6 @@ import sqlite3
 import base64
 import ipaddress
 import threading
-from manual_devices import get_manual_devices
 from functools import wraps
 
 from flask import (
@@ -14,18 +14,33 @@ from flask import (
     request,
     jsonify,
     send_file,
+    send_from_directory,
     Response,
 )
+
+app = Flask(__name__, static_folder='images', static_url_path='/images')
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 from werkzeug.security import (
     check_password_hash,
     generate_password_hash,
 )
 
+from manual_devices import get_manual_devices
+
 from database import (
     get_all_devices,
-    get_online_devices
+    get_online_devices,
 )
+
+# === EXCEL_FEATURE_IMPORT ===
+from excel_import.excel_manager import (
+    import_excel,
+    export_excel,
+    template_excel,
+)
+
+
 # ============================================================
 # Configuration
 # ============================================================
@@ -42,7 +57,44 @@ PORT = int(
     )
 )
 
+# ============================================================
+# Flask Application
+# ============================================================
+
 app = Flask(__name__)
+
+# ============================================================
+# Static Images
+# ============================================================
+
+@app.route("/images/<path:filename>")
+def serve_image(filename):
+    """
+    Serve images from /app/images/
+    Example:
+        /images/sazman.png
+        /images/sabanet.png
+    """
+    images_dir = "/app/images"
+
+    file_path = os.path.join(images_dir, filename)
+
+    # جلوگیری از درخواست فایل‌های غیر موجود
+    if not os.path.isfile(file_path):
+        return jsonify({
+            "error": "Image not found",
+            "filename": filename
+        }), 404
+
+    return send_from_directory(
+        images_dir,
+        filename
+    )
+
+# ============================================================
+# ادامه کدهای api_server.py از اینجا
+# ============================================================
+
 
 
 # ============================================================
@@ -680,6 +732,77 @@ def update_manual_device(ip):
         dict(updated)
     )
 
+
+# ============================================================
+# Excel Import / Export
+# ============================================================
+
+@app.get("/api/excel/template")
+@require_auth
+@require_full
+def excel_template():
+
+    output = template_excel()
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="wireless_monitor_antenna_template.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/api/excel/export")
+@require_auth
+@require_full
+def excel_export():
+
+    output = export_excel(DB_PATH)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="wireless_monitor_antenna_export.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.post("/api/excel/import")
+@require_auth
+@require_full
+def excel_import_route():
+
+    upload = request.files.get("file")
+
+    if upload is None or not upload.filename:
+        return jsonify({
+            "error": "file_required",
+            "message": "لطفاً فایل Excel را انتخاب کنید"
+        }), 400
+
+    filename = upload.filename.lower()
+
+    if not (filename.endswith(".xlsx") or filename.endswith(".xlsm")):
+        return jsonify({
+            "error": "invalid_file_type",
+            "message": "فقط فایل XLSX یا XLSM قابل قبول است"
+        }), 400
+
+    try:
+        result = import_excel(upload.stream, DB_PATH)
+    except ValueError as exc:
+        return jsonify({
+            "error": "excel_validation_error",
+            "message": str(exc)
+        }), 400
+    except Exception:
+        app.logger.exception("Excel import failed")
+        return jsonify({
+            "error": "excel_import_failed",
+            "message": "خطا در پردازش فایل Excel"
+        }), 500
+
+    return jsonify(result)
 
 # ============================================================
 # Statistics
