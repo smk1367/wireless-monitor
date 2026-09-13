@@ -6,28 +6,48 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file: .env
+
     environment:
       PORT: 5000
+
       SCAN_NETWORK: ${SCAN_NETWORK:-172.17.240.0/20}
       SSH_PORT: ${SSH_PORT:-22}
       SSH_TIMEOUT: ${SSH_TIMEOUT:-10}
       SCAN_WORKERS: ${SCAN_WORKERS:-40}
       RUN_INITIAL_SCAN: ${RUN_INITIAL_SCAN:-0}
+
       DASHBOARD_USER: ${DASHBOARD_USER:-admin}
       DASHBOARD_PASS: ${DASHBOARD_PASS:-change-me}
+
       SSH_USER: ${SSH_USER:-}
       SSH_PASS: ${SSH_PASS:-}
       SSH_CREDENTIALS_JSON: ${SSH_CREDENTIALS_JSON:-}
+
       SSH_USER_1: ${SSH_USER_1:-}
       SSH_PASS_1: ${SSH_PASS_1:-}
+
       SSH_USER_2: ${SSH_USER_2:-}
       SSH_PASS_2: ${SSH_PASS_2:-}
+
       SSH_USER_3: ${SSH_USER_3:-}
       SSH_PASS_3: ${SSH_PASS_3:-}
+
       SSH_USER_4: ${SSH_USER_4:-}
       SSH_PASS_4: ${SSH_PASS_4:-}
+
       SSH_USER_5: ${SSH_USER_5:-}
       SSH_PASS_5: ${SSH_PASS_5:-}
+
+      # =========================
+      # SNMP
+      # =========================
+      SNMP_ENABLED: ${SNMP_ENABLED:-1}
+      SNMP_VERSION: ${SNMP_VERSION:-2c}
+      SNMP_PORT: ${SNMP_PORT:-161}
+      SNMP_TIMEOUT: ${SNMP_TIMEOUT:-3}
+      SNMP_RETRIES: ${SNMP_RETRIES:-2}
+      SNMP_COMMUNITY: ${SNMP_COMMUNITY:-ngstehwl}
+
     volumes:
       - db_data:/app/data
       - ./logs:/app/logs
