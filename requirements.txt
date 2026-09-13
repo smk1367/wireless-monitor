@@ -2,3 +2,4 @@ paramiko>=3.4.0
 flask>=3.0.3
 flask-cors>=5.0.0
 pysnmp
+openpyxl>=3.1.0
